@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "296472161173",
+    "project_id": "swipesort-6cae8",
+    "storage_bucket": "swipesort-6cae8.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:296472161173:android:27b9308377ae0b9ecc249c",
+        "android_client_info": {
+          "package_name": "com.anonymous.swipesort"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBITkWRbdyzbBOsLxr729nsgWLY3LHuQsQ"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
