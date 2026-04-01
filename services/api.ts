@@ -1,5 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
+export type GenerationMode = 'fast' | 'balanced' | 'premium';
+
 export type GenerateSketchPayload = {
   imageBase64?: string | null;
   imageUri?: string;
@@ -14,11 +16,13 @@ export type StartGenerationPayload = {
   imageBase64?: string | null;
   mimeType?: string | null;
   sessionId?: string;
+  generationMode?: GenerationMode;
 };
 
 export type VariationPayload = {
   prompt?: string;
   variationIntent?: string;
+  generationMode?: GenerationMode;
 };
 
 export type GenerationRecord = {
@@ -32,6 +36,7 @@ export type GenerationRecord = {
   hasSketch?: boolean;
   imageBase64?: string | null;
   imageDataUrl?: string | null;
+  generationMode?: GenerationMode;
   error?: {
     message?: string;
     details?: unknown;
@@ -118,6 +123,7 @@ export async function startGeneration(
       imageBase64: payload.imageBase64 || null,
       mimeType: payload.mimeType || 'image/jpeg',
       sessionId,
+      generationMode: payload.generationMode || 'balanced',
     }),
   });
 
@@ -153,6 +159,7 @@ export async function createVariation(
     body: JSON.stringify({
       prompt: payload.prompt,
       variationIntent: payload.variationIntent || 'alternate',
+      generationMode: payload.generationMode || 'balanced',
     }),
   });
 
@@ -219,10 +226,10 @@ export async function generateSketchConcept(
 
     const data = (await response.json()) as GenerateSketchResponse;
     return data;
-  } catch (error) {
+  } catch (error: any) {
     return {
       success: false,
-      error: error instanceof Error ? error.message : 'Unknown error',
+      error: error?.message || 'Unknown error',
     };
   }
 }

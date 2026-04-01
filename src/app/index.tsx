@@ -1,3 +1,4 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import * as ImagePicker from 'expo-image-picker';
@@ -19,6 +20,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import TopBar from '../../components/TopBar';
 import {
   createVariation,
+  GenerationMode,
   GenerationRecord,
   getOrCreateSessionId,
   pollGenerationUntilFinished,
@@ -31,6 +33,7 @@ type GeneratePayload = {
   prompt: string;
   imageBase64: string | null;
   mimeType: string | null;
+  generationMode: GenerationMode;
 };
 
 type Message = {
@@ -46,6 +49,7 @@ type Message = {
   sessionId?: string;
   sourceGenerationId?: string | null;
   type?: 'base' | 'variation' | string;
+  generationMode?: GenerationMode;
 };
 
 type SelectedImage = {
@@ -54,13 +58,30 @@ type SelectedImage = {
   mimeType: string;
 };
 
+type UiSettings = {
+  autoSave: boolean;
+  haptics: boolean;
+  defaultGenerationMode: GenerationMode;
+};
+
 const KEYBOARD_GAP = 48;
+const SETTINGS_KEY = 'sketchit_ui_settings_v1';
 const PROMPT_SUGGESTIONS = [
   'Modern black chair with metal legs',
   'Minimal wooden side table, studio photo',
   'Clean shelf design from my sketch',
   'Premium desk lamp, realistic product render',
 ];
+const MODE_OPTIONS: { key: GenerationMode; label: string; shortLabel: string }[] = [
+  { key: 'fast', label: 'Fast', shortLabel: 'Fast' },
+  { key: 'balanced', label: 'Medium', shortLabel: 'Medium' },
+  { key: 'premium', label: 'Premium', shortLabel: 'Premium' },
+];
+const defaultSettings: UiSettings = {
+  autoSave: true,
+  haptics: true,
+  defaultGenerationMode: 'balanced',
+};
 
 export default function ChatScreen() {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -70,6 +91,8 @@ export default function ChatScreen() {
   const [pendingCount, setPendingCount] = useState(0);
   const [fullscreenImage, setFullscreenImage] = useState<string | null>(null);
   const [heroDismissed, setHeroDismissed] = useState(false);
+  const [settings, setSettings] = useState<UiSettings>(defaultSettings);
+  const [generationMode, setGenerationMode] = useState<GenerationMode>('balanced');
 
   const flatListRef = useRef<FlatList<Message>>(null);
   const insets = useSafeAreaInsets();
@@ -78,6 +101,7 @@ export default function ChatScreen() {
     getOrCreateSessionId().catch((error) => {
       console.log('Session init error:', error);
     });
+    loadSettings();
   }, []);
 
   useEffect(() => {
@@ -103,6 +127,22 @@ export default function ChatScreen() {
     return () => clearTimeout(timer);
   }, [messages, pendingCount]);
 
+  const loadSettings = async () => {
+    try {
+      const raw = await AsyncStorage.getItem(SETTINGS_KEY);
+      if (!raw) {
+        setGenerationMode(defaultSettings.defaultGenerationMode);
+        return;
+      }
+
+      const parsed = { ...defaultSettings, ...JSON.parse(raw) } as UiSettings;
+      setSettings(parsed);
+      setGenerationMode(parsed.defaultGenerationMode || 'balanced');
+    } catch {
+      setGenerationMode(defaultSettings.defaultGenerationMode);
+    }
+  };
+
   const buildDataUri = (base64: string) => `data:image/png;base64,${base64}`;
 
   const addMessage = (message: Message) => {
@@ -115,24 +155,22 @@ export default function ChatScreen() {
     );
   };
 
-  const triggerSoftHaptic = async () => {
-    try {
-      await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    } catch {
-      // ignore
-    }
-  };
+  const runHaptic = async (
+    type: 'soft' | 'success' | 'error' = 'soft'
+  ) => {
+    if (!settings.haptics) return;
 
-  const triggerSuccessHaptic = async () => {
     try {
-      await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    } catch {
-      // ignore
-    }
-  };
+      if (type === 'soft') {
+        await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+        return;
+      }
 
-  const triggerErrorHaptic = async () => {
-    try {
+      if (type === 'success') {
+        await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        return;
+      }
+
       await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
     } catch {
       // ignore
@@ -172,7 +210,7 @@ export default function ChatScreen() {
           mimeType: asset.mimeType || 'image/jpeg',
         });
 
-        await triggerSoftHaptic();
+        await runHaptic('soft');
       }
     } catch {
       Alert.alert('Error', 'The image could not be selected.');
@@ -212,7 +250,7 @@ export default function ChatScreen() {
           mimeType: asset.mimeType || 'image/jpeg',
         });
 
-        await triggerSoftHaptic();
+        await runHaptic('soft');
       }
     } catch {
       Alert.alert('Error', 'The photo could not be taken.');
@@ -239,7 +277,7 @@ export default function ChatScreen() {
   const onShareImage = async (imageUri: string) => {
     try {
       await shareImageFile(imageUri);
-      await triggerSoftHaptic();
+      await runHaptic('soft');
     } catch (error: any) {
       Alert.alert('Error', error?.message || 'The image could not be shared.');
     }
@@ -248,7 +286,7 @@ export default function ChatScreen() {
   const onSaveImage = async (imageUri: string) => {
     try {
       await saveImageToGallery(imageUri);
-      await triggerSuccessHaptic();
+      await runHaptic('success');
       Alert.alert('Saved', 'The image was saved to your gallery.');
     } catch (error: any) {
       Alert.alert('Error', error?.message || 'The image could not be saved.');
@@ -277,7 +315,32 @@ export default function ChatScreen() {
       sessionId: generation.sessionId,
       sourceGenerationId: generation.sourceGenerationId || null,
       type: generation.type,
+      generationMode: generation.generationMode || payload.generationMode,
     };
+  };
+
+  const maybeAutoSaveToHistory = async (
+    successMessage: Message,
+    prompt: string,
+    inputImageUri: string | undefined,
+    finished: GenerationRecord
+  ) => {
+    if (!settings.autoSave || !successMessage.image) {
+      return;
+    }
+
+    await saveHistoryItem({
+      id: `history-${Date.now()}`,
+      createdAt: Date.now(),
+      prompt,
+      inputImage: inputImageUri,
+      resultImage: successMessage.image,
+      generationId: finished.id,
+      sessionId: finished.sessionId,
+      sourceGenerationId: finished.sourceGenerationId || null,
+      type: finished.type,
+      generationMode: finished.generationMode || generationMode,
+    });
   };
 
   const runBaseGeneration = async (
@@ -290,43 +353,32 @@ export default function ChatScreen() {
       id: loadingId,
       role: 'ai',
       status: 'loading',
-      text: selectedImage
-        ? 'Reading your sketch and generating a realistic concept…'
-        : 'Generating your concept…',
+      text: payload.imageBase64
+        ? `Reading your sketch and generating a realistic concept in ${getModeLabel(payload.generationMode)} mode…`
+        : `Generating your concept in ${getModeLabel(payload.generationMode)} mode…`,
       generatePayload: payload,
+      generationMode: payload.generationMode,
     });
 
     setPendingCount((prev) => prev + 1);
-    await triggerSoftHaptic();
+    await runHaptic('soft');
 
     try {
       const started = await startGeneration({
         prompt: payload.prompt || 'Generate a realistic image based on this sketch.',
         imageBase64: payload.imageBase64,
         mimeType: payload.mimeType,
+        generationMode: payload.generationMode,
       });
 
       const finished = await pollGenerationUntilFinished(started.generation.id);
       const successMessage = buildSuccessMessage(finished, payload);
 
       replaceMessage(loadingId, successMessage);
-      await triggerSuccessHaptic();
-
-      if (successMessage.image) {
-        await saveHistoryItem({
-          id: `history-${Date.now()}`,
-          createdAt: Date.now(),
-          prompt: payload.prompt || '',
-          inputImage: inputImageUri,
-          resultImage: successMessage.image,
-          generationId: finished.id,
-          sessionId: finished.sessionId,
-          sourceGenerationId: finished.sourceGenerationId || null,
-          type: finished.type,
-        });
-      }
+      await runHaptic('success');
+      await maybeAutoSaveToHistory(successMessage, payload.prompt || '', inputImageUri, finished);
     } catch (error: any) {
-      await triggerErrorHaptic();
+      await runHaptic('error');
       replaceMessage(loadingId, {
         id: `error-${Date.now()}`,
         role: 'ai',
@@ -346,46 +398,48 @@ export default function ChatScreen() {
     }
 
     const loadingId = `variation-loading-${Date.now()}`;
+    const nextMode = message.generatePayload.generationMode || generationMode;
 
     addMessage({
       id: loadingId,
       role: 'ai',
       status: 'loading',
-      text: 'Creating a more distinct alternative…',
-      generatePayload: message.generatePayload,
+      text: `Creating a more distinct alternative in ${getModeLabel(nextMode)} mode…`,
+      generatePayload: {
+        ...message.generatePayload,
+        generationMode: nextMode,
+      },
       sourceGenerationId: message.generationId,
       type: 'variation',
+      generationMode: nextMode,
     });
 
     setPendingCount((prev) => prev + 1);
-    await triggerSoftHaptic();
+    await runHaptic('soft');
 
     try {
       const started = await createVariation(message.generationId, {
         prompt: message.generatePayload.prompt,
         variationIntent: 'alternate',
+        generationMode: nextMode,
       });
 
       const finished = await pollGenerationUntilFinished(started.generation.id);
-      const successMessage = buildSuccessMessage(finished, message.generatePayload);
+      const successMessage = buildSuccessMessage(finished, {
+        ...message.generatePayload,
+        generationMode: nextMode,
+      });
 
       replaceMessage(loadingId, successMessage);
-      await triggerSuccessHaptic();
-
-      if (successMessage.image) {
-        await saveHistoryItem({
-          id: `history-${Date.now()}`,
-          createdAt: Date.now(),
-          prompt: message.generatePayload.prompt || '',
-          resultImage: successMessage.image,
-          generationId: finished.id,
-          sessionId: finished.sessionId,
-          sourceGenerationId: finished.sourceGenerationId || null,
-          type: finished.type,
-        });
-      }
+      await runHaptic('success');
+      await maybeAutoSaveToHistory(
+        successMessage,
+        message.generatePayload.prompt || '',
+        undefined,
+        finished
+      );
     } catch (error: any) {
-      await triggerErrorHaptic();
+      await runHaptic('error');
       replaceMessage(loadingId, {
         id: `error-${Date.now()}`,
         role: 'ai',
@@ -404,6 +458,7 @@ export default function ChatScreen() {
       prompt: input.trim(),
       imageBase64: selectedImage?.base64 || null,
       mimeType: selectedImage?.mimeType || null,
+      generationMode,
     };
 
     const selectedImageUri = selectedImage?.uri;
@@ -414,6 +469,7 @@ export default function ChatScreen() {
       status: 'done',
       text: payload.prompt || undefined,
       image: selectedImageUri,
+      generationMode,
     };
 
     addMessage(userMessage);
@@ -432,6 +488,13 @@ export default function ChatScreen() {
   const applySuggestion = (value: string) => {
     setInput(value);
     setHeroDismissed(true);
+  };
+
+  const getHelperText = () => {
+    if (pendingCount > 0) return 'Generating…';
+    if (generationMode === 'fast') return 'Fast mode · lower cost';
+    if (generationMode === 'premium') return 'Premium mode · richer output';
+    return 'Medium mode · recommended';
   };
 
   const bottomOffset =
@@ -459,9 +522,21 @@ export default function ChatScreen() {
                 ]}
               />
               <Text style={styles.metaBadgeText}>
-                {isError ? 'Error' : isLoading ? 'Generating' : item.type === 'variation' ? 'Alternative' : 'Result'}
+                {isError
+                  ? 'Error'
+                  : isLoading
+                    ? 'Generating'
+                    : item.type === 'variation'
+                      ? 'Alternative'
+                      : 'Result'}
               </Text>
             </View>
+
+            {!isLoading && !isError && item.generationMode ? (
+              <View style={styles.modeBadgeCompact}>
+                <Text style={styles.modeBadgeCompactText}>{getModeLabel(item.generationMode)}</Text>
+              </View>
+            ) : null}
           </View>
         ) : null}
 
@@ -543,7 +618,7 @@ export default function ChatScreen() {
         keyExtractor={(item) => item.id}
         contentContainerStyle={{
           padding: 16,
-          paddingBottom: 190,
+          paddingBottom: 230,
           gap: 14,
         }}
         keyboardShouldPersistTaps="handled"
@@ -556,7 +631,7 @@ export default function ChatScreen() {
               </View>
               <Text style={styles.heroTitle}>Sketch to image</Text>
               <Text style={styles.heroText}>
-                Upload a sketch or just describe your idea. SketchIT will turn it into a realistic concept.
+                Upload a sketch or just describe your idea. Medium mode is now the best default for strong quality without unnecessary cost.
               </Text>
 
               <View style={styles.heroSuggestionWrap}>
@@ -586,7 +661,7 @@ export default function ChatScreen() {
       />
 
       {selectedImage ? (
-        <View style={[styles.previewRow, { bottom: bottomOffset + 82 }]}> 
+        <View style={[styles.previewRow, { bottom: bottomOffset + 120 }]}> 
           <Pressable onPress={() => setFullscreenImage(selectedImage.uri)}>
             <Image source={{ uri: selectedImage.uri }} style={styles.previewImage} />
           </Pressable>
@@ -611,10 +686,27 @@ export default function ChatScreen() {
         <View style={styles.inputTopRow}>
           <View style={styles.helperPill}>
             <Ionicons name="flash-outline" size={14} color="#d4d4d8" />
-            <Text style={styles.helperPillText}>
-              {pendingCount > 0 ? 'Generating…' : 'Fast mode · 1 image'}
-            </Text>
+            <Text style={styles.helperPillText}>{getHelperText()}</Text>
           </View>
+        </View>
+
+        <View style={styles.modeSelectorRow}>
+          {MODE_OPTIONS.map((mode) => {
+            const active = generationMode === mode.key;
+
+            return (
+              <Pressable
+                key={mode.key}
+                onPress={() => setGenerationMode(mode.key)}
+                style={[styles.modeChip, active && styles.modeChipActive]}
+                disabled={pendingCount > 0}
+              >
+                <Text style={[styles.modeChipText, active && styles.modeChipTextActive]}>
+                  {mode.label}
+                </Text>
+              </Pressable>
+            );
+          })}
         </View>
 
         <View style={styles.inputRow}>
@@ -674,6 +766,12 @@ export default function ChatScreen() {
       </Modal>
     </View>
   );
+}
+
+function getModeLabel(mode: GenerationMode) {
+  if (mode === 'fast') return 'Fast';
+  if (mode === 'premium') return 'Premium';
+  return 'Medium';
 }
 
 const styles = StyleSheet.create({
@@ -752,6 +850,8 @@ const styles = StyleSheet.create({
   messageMetaRow: {
     flexDirection: 'row',
     justifyContent: 'flex-start',
+    alignItems: 'center',
+    gap: 8,
   },
   metaBadge: {
     flexDirection: 'row',
@@ -779,6 +879,19 @@ const styles = StyleSheet.create({
     backgroundColor: '#ef4444',
   },
   metaBadgeText: {
+    color: '#d4d4d8',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  modeBadgeCompact: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#1f1f23',
+    backgroundColor: '#0e0e10',
+  },
+  modeBadgeCompactText: {
     color: '#d4d4d8',
     fontSize: 12,
     fontWeight: '700',
@@ -901,46 +1014,73 @@ const styles = StyleSheet.create({
     lineHeight: 18,
   },
   previewClose: {
-    width: 32,
-    height: 32,
-    borderRadius: 999,
+    width: 34,
+    height: 34,
+    borderRadius: 17,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: '#141416',
+    borderWidth: 1,
+    borderColor: '#24242a',
   },
   inputShell: {
     position: 'absolute',
     left: 12,
     right: 12,
-    backgroundColor: '#070708',
-    borderWidth: 1,
-    borderColor: '#18181b',
+    backgroundColor: '#0b0b0d',
     borderRadius: 28,
-    paddingHorizontal: 12,
-    paddingTop: 10,
-    paddingBottom: 12,
+    borderWidth: 1,
+    borderColor: '#1f1f23',
+    padding: 12,
+    gap: 10,
   },
   inputTopRow: {
     flexDirection: 'row',
+    alignItems: 'center',
     justifyContent: 'flex-start',
-    marginBottom: 10,
-    paddingHorizontal: 4,
   },
   helperPill: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    backgroundColor: '#101012',
-    borderRadius: 999,
+    backgroundColor: '#111113',
     borderWidth: 1,
-    borderColor: '#1d1d22',
+    borderColor: '#1f1f23',
     paddingHorizontal: 10,
-    paddingVertical: 6,
+    paddingVertical: 7,
+    borderRadius: 999,
   },
   helperPillText: {
     color: '#d4d4d8',
     fontSize: 12,
     fontWeight: '700',
+  },
+  modeSelectorRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  modeChip: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 38,
+    borderRadius: 999,
+    backgroundColor: '#111113',
+    borderWidth: 1,
+    borderColor: '#1f1f23',
+    paddingHorizontal: 12,
+  },
+  modeChipActive: {
+    backgroundColor: '#ffffff',
+    borderColor: '#ffffff',
+  },
+  modeChipText: {
+    color: '#d4d4d8',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  modeChipTextActive: {
+    color: '#000000',
   },
   inputRow: {
     flexDirection: 'row',
@@ -951,47 +1091,60 @@ const styles = StyleSheet.create({
     width: 46,
     height: 46,
     borderRadius: 23,
-    backgroundColor: '#141416',
     alignItems: 'center',
     justifyContent: 'center',
+    backgroundColor: '#131316',
+    borderWidth: 1,
+    borderColor: '#24242a',
   },
   input: {
     flex: 1,
+    maxHeight: 120,
     minHeight: 46,
-    maxHeight: 130,
     color: '#ffffff',
     fontSize: 15,
-    paddingTop: 12,
-    paddingBottom: 12,
+    lineHeight: 21,
     paddingHorizontal: 14,
-    backgroundColor: '#101012',
+    paddingVertical: 12,
+    backgroundColor: '#131316',
     borderRadius: 22,
+    borderWidth: 1,
+    borderColor: '#24242a',
   },
   sendButton: {
     width: 46,
     height: 46,
     borderRadius: 23,
-    backgroundColor: '#ffffff',
     alignItems: 'center',
     justifyContent: 'center',
+    backgroundColor: '#ffffff',
   },
   sendButtonDisabled: {
     opacity: 0.45,
   },
   modalOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.95)',
+    backgroundColor: 'rgba(0,0,0,0.96)',
     justifyContent: 'center',
     alignItems: 'center',
+    padding: 20,
   },
   modalClose: {
     position: 'absolute',
-    top: 60,
-    right: 20,
+    top: 56,
+    right: 24,
     zIndex: 10,
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
   },
   fullscreenImage: {
     width: '100%',
-    height: '100%',
+    height: '78%',
   },
 });

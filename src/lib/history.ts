@@ -1,4 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import type { GenerationMode } from '../../services/api';
 
 export type HistoryItem = {
   id: string;
@@ -10,6 +11,7 @@ export type HistoryItem = {
   sessionId?: string;
   sourceGenerationId?: string | null;
   type?: 'base' | 'variation' | string;
+  generationMode?: GenerationMode;
 };
 
 export const HISTORY_STORAGE_KEY = 'sketchit_history';

@@ -2,17 +2,38 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import React, { useEffect, useState } from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
 import TopBar from '../../components/TopBar';
+import type { GenerationMode } from '../../services/api';
 import { getOrCreateSessionId, resetStoredSessionId } from '../../services/api';
 
 type AppSettings = {
   autoSave: boolean;
   haptics: boolean;
+  defaultGenerationMode: GenerationMode;
 };
 
 const SETTINGS_KEY = 'sketchit_ui_settings_v1';
+const MODE_OPTIONS: { key: GenerationMode; label: string; subtitle: string }[] = [
+  {
+    key: 'fast',
+    label: 'Fast',
+    subtitle: 'Lower latency and lower cost.',
+  },
+  {
+    key: 'balanced',
+    label: 'Medium',
+    subtitle: 'Best default. Good quality, speed and cost.',
+  },
+  {
+    key: 'premium',
+    label: 'Premium',
+    subtitle: 'Richer output feel. Best later for paid users.',
+  },
+];
+
 const defaultSettings: AppSettings = {
   autoSave: true,
   haptics: true,
+  defaultGenerationMode: 'balanced',
 };
 
 export default function SettingsScreen() {
@@ -53,10 +74,17 @@ export default function SettingsScreen() {
     }
   };
 
-  const toggleSetting = async (key: keyof AppSettings, value: boolean) => {
+  const toggleSetting = async (key: keyof Pick<AppSettings, 'autoSave' | 'haptics'>, value: boolean) => {
     await saveSettings({
       ...settings,
       [key]: value,
+    });
+  };
+
+  const setDefaultMode = async (mode: GenerationMode) => {
+    await saveSettings({
+      ...settings,
+      defaultGenerationMode: mode,
     });
   };
 
@@ -87,8 +115,35 @@ export default function SettingsScreen() {
         <View style={styles.heroCard}>
           <Text style={styles.heroTitle}>Premium-ready foundation</Text>
           <Text style={styles.heroSubtitle}>
-            This screen is now stable and already prepared for future limits, credits, cloud sync and account settings.
+            Medium is now the recommended default mode. It keeps SketchIT fast, polished and much easier to control on cost.
           </Text>
+        </View>
+
+        <View style={styles.card}>
+          <Text style={styles.sectionTitle}>Default generation mode</Text>
+          <Text style={styles.sectionIntro}>
+            This controls the standard output mode when you open the app. You can still change it on the main screen before sending.
+          </Text>
+
+          <View style={styles.modeList}>
+            {MODE_OPTIONS.map((mode) => {
+              const active = settings.defaultGenerationMode === mode.key;
+
+              return (
+                <Pressable
+                  key={mode.key}
+                  style={[styles.modeCard, active && styles.modeCardActive]}
+                  onPress={() => setDefaultMode(mode.key)}
+                >
+                  <View style={styles.modeHeaderRow}>
+                    <Text style={styles.modeTitle}>{mode.label}</Text>
+                    {active ? <Text style={styles.modeActiveBadge}>Default</Text> : null}
+                  </View>
+                  <Text style={styles.modeSubtitle}>{mode.subtitle}</Text>
+                </Pressable>
+              );
+            })}
+          </View>
         </View>
 
         <View style={styles.card}>
@@ -102,8 +157,8 @@ export default function SettingsScreen() {
             <Switch
               value={settings.autoSave}
               onValueChange={(value) => toggleSetting('autoSave', value)}
-              trackColor={{ false: '#27272a', true: '#ffffff' }}
-              thumbColor={settings.autoSave ? '#000000' : '#ffffff'}
+              trackColor={{ false: '#27272a', true: '#3f3f46' }}
+              thumbColor="#ffffff"
             />
           </View>
 
@@ -112,43 +167,32 @@ export default function SettingsScreen() {
           <View style={styles.row}>
             <View style={styles.rowTextWrap}>
               <Text style={styles.rowTitle}>Haptics</Text>
-              <Text style={styles.rowSubtitle}>Use small vibration feedback for actions and completed generations.</Text>
+              <Text style={styles.rowSubtitle}>Use subtle touch feedback for generate, save and actions.</Text>
             </View>
             <Switch
               value={settings.haptics}
               onValueChange={(value) => toggleSetting('haptics', value)}
-              trackColor={{ false: '#27272a', true: '#ffffff' }}
-              thumbColor={settings.haptics ? '#000000' : '#ffffff'}
+              trackColor={{ false: '#27272a', true: '#3f3f46' }}
+              thumbColor="#ffffff"
             />
           </View>
         </View>
 
         <View style={styles.card}>
-          <Text style={styles.sectionTitle}>Generation session</Text>
+          <Text style={styles.sectionTitle}>Session</Text>
+
           <Text style={styles.smallLabel}>Current session ID</Text>
           <Text style={styles.sessionValue}>{sessionId}</Text>
-          <Text style={styles.helperText}>
-            This groups generated results together and prepares the app for a future chat-style history.
-          </Text>
 
           <Pressable
             onPress={handleResetSession}
-            style={[styles.primaryButton, isResetting && styles.buttonDisabled]}
+            style={[styles.primaryButton, isResetting && styles.primaryButtonDisabled]}
             disabled={isResetting}
           >
-            <Text style={styles.primaryButtonText}>Start new session</Text>
+            <Text style={styles.primaryButtonText}>
+              {isResetting ? 'Resetting...' : 'Start new session'}
+            </Text>
           </Pressable>
-        </View>
-
-        <View style={styles.card}>
-          <Text style={styles.sectionTitle}>Coming next</Text>
-          <View style={styles.featureList}>
-            <Text style={styles.featureItem}>• chat-based generation history</Text>
-            <Text style={styles.featureItem}>• multiple image variants</Text>
-            <Text style={styles.featureItem}>• premium credits and daily limits</Text>
-            <Text style={styles.featureItem}>• optional accounts and cloud sync</Text>
-            <Text style={styles.featureItem}>• more precise prompt controls</Text>
-          </View>
         </View>
       </ScrollView>
     </View>
@@ -198,7 +242,52 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontSize: 18,
     fontWeight: '700',
-    marginBottom: 16,
+    marginBottom: 10,
+  },
+  sectionIntro: {
+    color: '#a1a1aa',
+    fontSize: 13,
+    lineHeight: 19,
+    marginBottom: 14,
+  },
+  modeList: {
+    gap: 10,
+  },
+  modeCard: {
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: '#1f1f23',
+    backgroundColor: '#111113',
+    padding: 14,
+  },
+  modeCardActive: {
+    borderColor: '#ffffff',
+  },
+  modeHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 6,
+    gap: 12,
+  },
+  modeTitle: {
+    color: '#ffffff',
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  modeActiveBadge: {
+    color: '#000000',
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 999,
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  modeSubtitle: {
+    color: '#a1a1aa',
+    fontSize: 13,
+    lineHeight: 18,
   },
   row: {
     flexDirection: 'row',
@@ -238,35 +327,21 @@ const styles = StyleSheet.create({
     fontSize: 14,
     lineHeight: 21,
     fontWeight: '600',
-    marginBottom: 10,
-  },
-  helperText: {
-    color: '#a1a1aa',
-    fontSize: 13,
-    lineHeight: 19,
     marginBottom: 16,
   },
   primaryButton: {
-    height: 50,
-    borderRadius: 16,
-    backgroundColor: '#ffffff',
+    minHeight: 48,
     alignItems: 'center',
     justifyContent: 'center',
+    borderRadius: 18,
+    backgroundColor: '#ffffff',
+  },
+  primaryButtonDisabled: {
+    opacity: 0.5,
   },
   primaryButtonText: {
     color: '#000000',
-    fontSize: 15,
-    fontWeight: '800',
-  },
-  buttonDisabled: {
-    opacity: 0.55,
-  },
-  featureList: {
-    gap: 10,
-  },
-  featureItem: {
-    color: '#e4e4e7',
     fontSize: 14,
-    lineHeight: 20,
+    fontWeight: '800',
   },
 });
