@@ -2,15 +2,6 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export type GenerationMode = 'fast' | 'balanced' | 'premium';
 
-export type GenerateSketchPayload = {
-  imageBase64?: string | null;
-  imageUri?: string;
-  category?: string;
-  style?: string;
-  material?: string;
-  qualityMode?: 'fast' | 'balanced' | 'best';
-};
-
 export type StartGenerationPayload = {
   prompt: string;
   imageBase64?: string | null;
@@ -41,8 +32,8 @@ export type GenerationRecord = {
     message?: string;
     details?: unknown;
   } | null;
-  variationSeed?: number;
-  variationIntent?: string;
+  variationSeed?: number | null;
+  variationIntent?: string | null;
   meta?: {
     promptUsed?: string;
     [key: string]: unknown;
@@ -52,9 +43,22 @@ export type GenerationRecord = {
   finishedAt?: string | null;
 };
 
+export type UsageInfo = {
+  sessionId: string;
+  isPremium: boolean;
+  dailyCount: number;
+  dailyLimit: number;
+  remainingToday: number;
+  totalCount: number;
+  resetDayKey: string;
+  canUsePremiumMode: boolean;
+  canUseVariations: boolean;
+};
+
 export type StartGenerationResponse = {
   ok: boolean;
   generation: GenerationRecord;
+  usage?: UsageInfo;
 };
 
 export type GetGenerationResponse = {
@@ -62,13 +66,24 @@ export type GetGenerationResponse = {
   generation: GenerationRecord;
 };
 
-export type GenerateSketchResponse = {
-  success: boolean;
-  imageUrl?: string;
-  imageBase64?: string;
-  jobId?: string;
-  error?: string;
+export type UsageResponse = {
+  ok: boolean;
+  usage: UsageInfo;
 };
+
+export class ApiError extends Error {
+  status: number;
+  code?: string;
+  usage?: UsageInfo;
+
+  constructor(message: string, status: number, code?: string, usage?: UsageInfo) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.code = code;
+    this.usage = usage;
+  }
+}
 
 const API_BASE_URL = 'https://sketchit-backend-plov.onrender.com';
 const SESSION_STORAGE_KEY = 'sketchit_active_session_id';
@@ -90,6 +105,18 @@ function getReadableError(status: number, fallback?: string) {
   return `Request failed with status ${status}`;
 }
 
+function toApiError(
+  status: number,
+  data?: { error?: string; code?: string; usage?: UsageInfo } | null
+) {
+  return new ApiError(
+    getReadableError(status, data?.error),
+    status,
+    data?.code,
+    data?.usage
+  );
+}
+
 export async function getOrCreateSessionId(): Promise<string> {
   const existing = await AsyncStorage.getItem(SESSION_STORAGE_KEY);
 
@@ -106,6 +133,40 @@ export async function resetStoredSessionId(): Promise<string> {
   const newSessionId = createLocalId('session');
   await AsyncStorage.setItem(SESSION_STORAGE_KEY, newSessionId);
   return newSessionId;
+}
+
+export async function fetchUsage(sessionId?: string): Promise<UsageInfo> {
+  const safeSessionId = sessionId || (await getOrCreateSessionId());
+  const response = await fetch(`${API_BASE_URL}/usage/${safeSessionId}`);
+  const data = await parseJsonSafe<UsageResponse & { error?: string; code?: string }>(response);
+
+  if (!response.ok || !data?.usage) {
+    throw toApiError(response.status, data);
+  }
+
+  return data.usage;
+}
+
+export async function setFakePremium(
+  isPremium: boolean,
+  sessionId?: string
+): Promise<UsageInfo> {
+  const safeSessionId = sessionId || (await getOrCreateSessionId());
+  const response = await fetch(`${API_BASE_URL}/session/${safeSessionId}/premium`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ isPremium }),
+  });
+
+  const data = await parseJsonSafe<UsageResponse & { error?: string; code?: string }>(response);
+
+  if (!response.ok || !data?.usage) {
+    throw toApiError(response.status, data);
+  }
+
+  return data.usage;
 }
 
 export async function startGeneration(
@@ -127,10 +188,10 @@ export async function startGeneration(
     }),
   });
 
-  const data = await parseJsonSafe<StartGenerationResponse & { error?: string }>(response);
+  const data = await parseJsonSafe<StartGenerationResponse & { error?: string; code?: string; usage?: UsageInfo }>(response);
 
   if (!response.ok || !data?.generation) {
-    throw new Error(getReadableError(response.status, data?.error));
+    throw toApiError(response.status, data);
   }
 
   return data;
@@ -138,10 +199,10 @@ export async function startGeneration(
 
 export async function getGeneration(generationId: string): Promise<GetGenerationResponse> {
   const response = await fetch(`${API_BASE_URL}/generation/${generationId}`);
-  const data = await parseJsonSafe<GetGenerationResponse & { error?: string }>(response);
+  const data = await parseJsonSafe<GetGenerationResponse & { error?: string; code?: string }>(response);
 
   if (!response.ok || !data?.generation) {
-    throw new Error(getReadableError(response.status, data?.error));
+    throw toApiError(response.status, data);
   }
 
   return data;
@@ -163,10 +224,10 @@ export async function createVariation(
     }),
   });
 
-  const data = await parseJsonSafe<StartGenerationResponse & { error?: string }>(response);
+  const data = await parseJsonSafe<StartGenerationResponse & { error?: string; code?: string; usage?: UsageInfo }>(response);
 
   if (!response.ok || !data?.generation) {
-    throw new Error(getReadableError(response.status, data?.error));
+    throw toApiError(response.status, data);
   }
 
   return data;
@@ -193,43 +254,14 @@ export async function pollGenerationUntilFinished(
 
     if (generation.status === 'error') {
       throw new Error(
-        generation.error?.message || 'Die Bildgenerierung ist fehlgeschlagen.'
+        generation.error?.message || 'The image generation failed.'
       );
     }
 
     if (Date.now() - startedAt > timeoutMs) {
-      throw new Error('Die Generierung dauert zu lange. Bitte erneut versuchen.');
+      throw new Error('The generation is taking too long. Please try again.');
     }
 
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
-  }
-}
-
-export async function generateSketchConcept(
-  payload: GenerateSketchPayload
-): Promise<GenerateSketchResponse> {
-  try {
-    const response = await fetch(`${API_BASE_URL}/generate`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(payload),
-    });
-
-    if (!response.ok) {
-      return {
-        success: false,
-        error: `Request failed with status ${response.status}`,
-      };
-    }
-
-    const data = (await response.json()) as GenerateSketchResponse;
-    return data;
-  } catch (error: any) {
-    return {
-      success: false,
-      error: error?.message || 'Unknown error',
-    };
   }
 }
