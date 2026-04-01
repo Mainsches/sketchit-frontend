@@ -10,12 +10,6 @@ export type StartGenerationPayload = {
   generationMode?: GenerationMode;
 };
 
-export type VariationPayload = {
-  prompt?: string;
-  variationIntent?: string;
-  generationMode?: GenerationMode;
-};
-
 export type GenerationRecord = {
   id: string;
   sessionId: string;
@@ -45,7 +39,6 @@ export type GenerationRecord = {
 
 export type UsageInfo = {
   sessionId: string;
-  plan: 'free' | 'premium';
   isPremium: boolean;
   dailyCount: number;
   dailyLimit: number;
@@ -54,23 +47,6 @@ export type UsageInfo = {
   resetDayKey: string;
   canUsePremiumMode: boolean;
   canUseVariations: boolean;
-};
-
-export type PlanConfig = {
-  key: 'free' | 'premium';
-  title: string;
-  dailyLimit: number;
-  modes: GenerationMode[];
-  variations: boolean;
-  notes: string[];
-};
-
-export type PlansResponse = {
-  ok: boolean;
-  plans: {
-    free: PlanConfig;
-    premium: PlanConfig;
-  };
 };
 
 export type StartGenerationResponse = {
@@ -147,49 +123,9 @@ export async function getOrCreateSessionId(): Promise<string> {
   return newSessionId;
 }
 
-export async function resetStoredSessionId(): Promise<string> {
-  const newSessionId = createLocalId('session');
-  await AsyncStorage.setItem(SESSION_STORAGE_KEY, newSessionId);
-  return newSessionId;
-}
-
 export async function fetchUsage(sessionId?: string): Promise<UsageInfo> {
   const safeSessionId = sessionId || (await getOrCreateSessionId());
   const response = await fetch(`${API_BASE_URL}/usage/${safeSessionId}`);
-  const data = await parseJsonSafe<UsageResponse & { error?: string; code?: string }>(response);
-
-  if (!response.ok || !data?.usage) {
-    throw toApiError(response.status, data);
-  }
-
-  return data.usage;
-}
-
-
-export async function fetchPlans(): Promise<PlansResponse["plans"]> {
-  const response = await fetch(`${API_BASE_URL}/plans`);
-  const data = await parseJsonSafe<PlansResponse & { error?: string; code?: string }>(response);
-
-  if (!response.ok || !data?.plans) {
-    throw toApiError(response.status, data);
-  }
-
-  return data.plans;
-}
-
-export async function setFakePremium(
-  isPremium: boolean,
-  sessionId?: string
-): Promise<UsageInfo> {
-  const safeSessionId = sessionId || (await getOrCreateSessionId());
-  const response = await fetch(`${API_BASE_URL}/session/${safeSessionId}/premium`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ isPremium }),
-  });
-
   const data = await parseJsonSafe<UsageResponse & { error?: string; code?: string }>(response);
 
   if (!response.ok || !data?.usage) {
@@ -236,62 +172,4 @@ export async function getGeneration(generationId: string): Promise<GetGeneration
   }
 
   return data;
-}
-
-export async function createVariation(
-  generationId: string,
-  payload: VariationPayload = {}
-): Promise<StartGenerationResponse> {
-  const response = await fetch(`${API_BASE_URL}/generation/${generationId}/variation`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      prompt: payload.prompt,
-      variationIntent: payload.variationIntent || 'alternate',
-      generationMode: payload.generationMode || 'balanced',
-    }),
-  });
-
-  const data = await parseJsonSafe<StartGenerationResponse & { error?: string; code?: string; usage?: UsageInfo }>(response);
-
-  if (!response.ok || !data?.generation) {
-    throw toApiError(response.status, data);
-  }
-
-  return data;
-}
-
-export async function pollGenerationUntilFinished(
-  generationId: string,
-  options?: {
-    intervalMs?: number;
-    timeoutMs?: number;
-  }
-): Promise<GenerationRecord> {
-  const intervalMs = options?.intervalMs ?? 1800;
-  const timeoutMs = options?.timeoutMs ?? 120000;
-  const startedAt = Date.now();
-
-  while (true) {
-    const result = await getGeneration(generationId);
-    const generation = result.generation;
-
-    if (generation.status === 'done') {
-      return generation;
-    }
-
-    if (generation.status === 'error') {
-      throw new Error(
-        generation.error?.message || 'The image generation failed.'
-      );
-    }
-
-    if (Date.now() - startedAt > timeoutMs) {
-      throw new Error('The generation is taking too long. Please try again.');
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
-  }
 }

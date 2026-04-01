@@ -106,8 +106,7 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#111111'
-  ,
+    backgroundColor: '#111111',
   },
   iconPlaceholder: {
     width: 40,
