@@ -21,6 +21,7 @@ import TopBar from '../../components/TopBar';
 import {
   ApiError,
   createVariation,
+  fetchPlans,
   fetchUsage,
   GenerationMode,
   GenerationRecord,
@@ -98,6 +99,7 @@ export default function ChatScreen() {
   const [generationMode, setGenerationMode] = useState<GenerationMode>('balanced');
   const [usage, setUsage] = useState<UsageInfo | null>(null);
   const [usageLoading, setUsageLoading] = useState(true);
+  const [plans, setPlans] = useState<null | Awaited<ReturnType<typeof fetchPlans>>>(null);
 
   const flatListRef = useRef<FlatList<Message>>(null);
   const insets = useSafeAreaInsets();
@@ -133,6 +135,12 @@ export default function ChatScreen() {
     try {
       await getOrCreateSessionId();
       await loadSettings();
+      try {
+        const nextPlans = await fetchPlans();
+        setPlans(nextPlans);
+      } catch (error) {
+        console.log('Plan fetch error:', error);
+      }
       await refreshUsage();
     } catch (error) {
       console.log('Init error:', error);
@@ -706,7 +714,7 @@ export default function ChatScreen() {
 
   return (
     <View style={styles.container}>
-      <TopBar title="SketchIT" />
+      <TopBar title="SketchIT" showHistory showSettings />
 
       <FlatList
         ref={flatListRef}

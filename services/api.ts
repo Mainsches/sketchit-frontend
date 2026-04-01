@@ -45,6 +45,7 @@ export type GenerationRecord = {
 
 export type UsageInfo = {
   sessionId: string;
+  plan: 'free' | 'premium';
   isPremium: boolean;
   dailyCount: number;
   dailyLimit: number;
@@ -53,6 +54,23 @@ export type UsageInfo = {
   resetDayKey: string;
   canUsePremiumMode: boolean;
   canUseVariations: boolean;
+};
+
+export type PlanConfig = {
+  key: 'free' | 'premium';
+  title: string;
+  dailyLimit: number;
+  modes: GenerationMode[];
+  variations: boolean;
+  notes: string[];
+};
+
+export type PlansResponse = {
+  ok: boolean;
+  plans: {
+    free: PlanConfig;
+    premium: PlanConfig;
+  };
 };
 
 export type StartGenerationResponse = {
@@ -145,6 +163,18 @@ export async function fetchUsage(sessionId?: string): Promise<UsageInfo> {
   }
 
   return data.usage;
+}
+
+
+export async function fetchPlans(): Promise<PlansResponse["plans"]> {
+  const response = await fetch(`${API_BASE_URL}/plans`);
+  const data = await parseJsonSafe<PlansResponse & { error?: string; code?: string }>(response);
+
+  if (!response.ok || !data?.plans) {
+    throw toApiError(response.status, data);
+  }
+
+  return data.plans;
 }
 
 export async function setFakePremium(

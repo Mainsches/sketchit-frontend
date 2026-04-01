@@ -2,8 +2,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import React, { useEffect, useState } from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
 import TopBar from '../../components/TopBar';
-import type { GenerationMode, UsageInfo } from '../../services/api';
-import { fetchUsage, getOrCreateSessionId, resetStoredSessionId, setFakePremium } from '../../services/api';
+import type { GenerationMode, PlanConfig, UsageInfo } from '../../services/api';
+import { fetchPlans, fetchUsage, getOrCreateSessionId, resetStoredSessionId, setFakePremium } from '../../services/api';
 
 type AppSettings = {
   autoSave: boolean;
@@ -41,11 +41,13 @@ export default function SettingsScreen() {
   const [sessionId, setSessionId] = useState<string>('Loading...');
   const [isResetting, setIsResetting] = useState(false);
   const [usage, setUsage] = useState<UsageInfo | null>(null);
+  const [plans, setPlans] = useState<{ free: PlanConfig; premium: PlanConfig } | null>(null);
   const [isPremiumSaving, setIsPremiumSaving] = useState(false);
 
   useEffect(() => {
     loadSettings();
     loadSessionAndUsage();
+    loadPlans();
   }, []);
 
   const loadSettings = async () => {
@@ -64,6 +66,16 @@ export default function SettingsScreen() {
       await AsyncStorage.setItem(SETTINGS_KEY, JSON.stringify(next));
     } catch {
       Alert.alert('Error', 'Settings could not be saved.');
+    }
+  };
+
+
+  const loadPlans = async () => {
+    try {
+      const nextPlans = await fetchPlans();
+      setPlans(nextPlans);
+    } catch {
+      // ignore
     }
   };
 
@@ -147,9 +159,40 @@ export default function SettingsScreen() {
         showsVerticalScrollIndicator={false}
       >
         <View style={styles.heroCard}>
-          <Text style={styles.heroTitle}>Premium-ready monetization</Text>
+          <Text style={styles.heroTitle}>Premium foundation is ready</Text>
           <Text style={styles.heroSubtitle}>
-            Free users get 2 Medium images per day. Premium later unlocks 50 images per day, Premium mode and variations.
+            Free users get 2 Medium images per day. Premium later unlocks 50 images per day, Premium mode and variations. This screen is now prepared for a real Play Billing connection later.
+          </Text>
+        </View>
+
+
+
+        <View style={styles.card}>
+          <Text style={styles.sectionTitle}>Plans</Text>
+          <Text style={styles.sectionIntro}>
+            Your app is currently using a fake premium toggle for testing. The structure below is already aligned with a future Google Play Billing integration.
+          </Text>
+
+          <View style={styles.planCompareRow}>
+            <View style={styles.planCompareCard}>
+              <Text style={styles.compareLabel}>Free</Text>
+              <Text style={styles.compareLimit}>{plans?.free?.dailyLimit ?? 2}/day</Text>
+              <Text style={styles.compareText}>Medium mode</Text>
+              <Text style={styles.compareText}>No variations</Text>
+            </View>
+
+            <View style={[styles.planCompareCard, styles.planCompareCardPremium]}>
+              <Text style={styles.compareLabel}>Premium</Text>
+              <Text style={styles.compareLimit}>{plans?.premium?.dailyLimit ?? 50}/day</Text>
+              <Text style={styles.compareText}>Premium mode</Text>
+              <Text style={styles.compareText}>Variations unlocked</Text>
+            </View>
+          </View>
+
+          <View style={styles.divider} />
+
+          <Text style={styles.rowSubtitle}>
+            Recommended monetization later: monthly subscription with a defined usage cap, not unlimited generations. That protects your costs much better for an AI image app.
           </Text>
         </View>
 
