@@ -63,6 +63,7 @@ export default function TopBar({
           <Text numberOfLines={1} style={styles.title}>
             {title}
           </Text>
+          <Text style={styles.subtitle}>AI sketch to image</Text>
         </View>
 
         <View style={[styles.side, styles.sideRight]}>{renderRight()}</View>
@@ -76,12 +77,13 @@ const styles = StyleSheet.create({
     backgroundColor: '#000000',
   },
   wrapper: {
-    height: 60,
+    minHeight: 72,
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 16,
+    paddingBottom: 10,
     borderBottomWidth: 1,
-    borderBottomColor: '#1f1f1f',
+    borderBottomColor: '#18181b',
   },
   side: {
     width: 56,
@@ -98,7 +100,13 @@ const styles = StyleSheet.create({
   title: {
     color: '#ffffff',
     fontSize: 20,
-    fontWeight: '700',
+    fontWeight: '800',
+  },
+  subtitle: {
+    color: '#71717a',
+    fontSize: 12,
+    fontWeight: '600',
+    marginTop: 2,
   },
   iconButton: {
     width: 40,
@@ -106,7 +114,9 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#111111',
+    backgroundColor: '#101012',
+    borderWidth: 1,
+    borderColor: '#1d1d22',
   },
   iconPlaceholder: {
     width: 40,

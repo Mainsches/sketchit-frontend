@@ -6,6 +6,10 @@ export type HistoryItem = {
   prompt: string;
   inputImage?: string;
   resultImage: string;
+  generationId?: string;
+  sessionId?: string;
+  sourceGenerationId?: string | null;
+  type?: 'base' | 'variation' | string;
 };
 
 export const HISTORY_STORAGE_KEY = 'sketchit_history';
