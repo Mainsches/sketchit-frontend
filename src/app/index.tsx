@@ -1,4 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useFocusEffect } from '@react-navigation/native';
+import * as FileSystem from 'expo-file-system/legacy';
 import * as ImagePicker from 'expo-image-picker';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -14,7 +17,6 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { useFocusEffect } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import TopBar from '../../components/TopBar';
 import {
@@ -55,12 +57,54 @@ type SheetReason = 'limit' | 'variation' | 'coming_soon';
 
 const KEYBOARD_GAP = 48;
 const POLL_INTERVAL_MS = 1800;
+const AUTO_SAVE_SETTING_KEY = 'sketchit_auto_save_generated_images';
 
 const PROMPT_SUGGESTIONS = [
   'Minimal white chair with metal legs',
   'Modern oak cabinet with two doors',
   'Floating shelf in dark walnut',
 ];
+
+function getExtensionFromMimeType(mimeType?: string | null) {
+  if (!mimeType) return 'jpg';
+  if (mimeType.includes('png')) return 'png';
+  if (mimeType.includes('webp')) return 'webp';
+  return 'jpg';
+}
+
+async function persistDataUrlToLocalFile(
+  dataUrl: string,
+  mimeType?: string | null
+): Promise<string> {
+  if (!dataUrl) {
+    throw new Error('No image data received from backend.');
+  }
+
+  if (!dataUrl.startsWith('data:image/')) {
+    return dataUrl;
+  }
+
+  const commaIndex = dataUrl.indexOf(',');
+  if (commaIndex === -1) {
+    throw new Error('Invalid image data received from backend.');
+  }
+
+  const base64Data = dataUrl.slice(commaIndex + 1);
+  const ext = getExtensionFromMimeType(mimeType);
+  const writableDir = FileSystem.cacheDirectory || FileSystem.documentDirectory;
+
+  if (!writableDir) {
+    throw new Error('No writable file directory available on this device.');
+  }
+
+  const fileUri = `${writableDir}sketchit_${Date.now()}.${ext}`;
+
+  await FileSystem.writeAsStringAsync(fileUri, base64Data, {
+    encoding: FileSystem.EncodingType.Base64,
+  });
+
+  return fileUri;
+}
 
 export default function ChatScreen() {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -72,6 +116,8 @@ export default function ChatScreen() {
   const [usage, setUsage] = useState<UsageInfo | null>(null);
   const [showInfoSheet, setShowInfoSheet] = useState(false);
   const [sheetReason, setSheetReason] = useState<SheetReason>('coming_soon');
+  const [hasShownLimitSheetThisOpen, setHasShownLimitSheetThisOpen] = useState(false);
+  const [autoSaveEnabled, setAutoSaveEnabled] = useState(false);
 
   const flatListRef = useRef<FlatList<Message>>(null);
   const insets = useSafeAreaInsets();
@@ -82,6 +128,11 @@ export default function ChatScreen() {
     });
   };
 
+  const openInfoSheet = useCallback((reason: SheetReason) => {
+    setSheetReason(reason);
+    setShowInfoSheet(true);
+  }, []);
+
   const loadUsage = useCallback(async () => {
     try {
       const nextUsage = await fetchUsage();
@@ -91,15 +142,40 @@ export default function ChatScreen() {
     }
   }, []);
 
+  const loadAutoSaveSetting = useCallback(async () => {
+    try {
+      const raw = await AsyncStorage.getItem(AUTO_SAVE_SETTING_KEY);
+      setAutoSaveEnabled(raw === 'true');
+    } catch (error) {
+      console.log('loadAutoSaveSetting error:', error);
+      setAutoSaveEnabled(false);
+    }
+  }, []);
+
   useEffect(() => {
     loadUsage();
-  }, [loadUsage]);
+    loadAutoSaveSetting();
+  }, [loadUsage, loadAutoSaveSetting]);
 
   useFocusEffect(
     useCallback(() => {
+      setHasShownLimitSheetThisOpen(false);
       loadUsage();
-    }, [loadUsage])
+      loadAutoSaveSetting();
+    }, [loadUsage, loadAutoSaveSetting])
   );
+
+  useEffect(() => {
+    if (
+      usage &&
+      usage.remainingToday <= 0 &&
+      !showInfoSheet &&
+      !hasShownLimitSheetThisOpen
+    ) {
+      setHasShownLimitSheetThisOpen(true);
+      openInfoSheet('limit');
+    }
+  }, [usage, showInfoSheet, hasShownLimitSheetThisOpen, openInfoSheet]);
 
   useEffect(() => {
     const showSub = Keyboard.addListener('keyboardDidShow', (e) => {
@@ -128,11 +204,6 @@ export default function ChatScreen() {
       scrollToBottom(true);
     }
   }, [messages.length]);
-
-  const openInfoSheet = (reason: SheetReason) => {
-    setSheetReason(reason);
-    setShowInfoSheet(true);
-  };
 
   const openImageOptions = () => {
     Alert.alert('Attach sketch', 'Choose how you want to attach your sketch.', [
@@ -254,12 +325,16 @@ export default function ChatScreen() {
         throw new Error(finalGeneration.error?.message || 'Generation failed.');
       }
 
-      const resultImage = finalGeneration.imageDataUrl;
+      const displayImage = finalGeneration.imageDataUrl;
+      const persistedImageUri = await persistDataUrlToLocalFile(
+        displayImage,
+        finalGeneration.mimeType || payload.mimeType
+      );
 
       const aiMessage: Message = {
         id: `${Date.now()}-ai`,
         role: 'ai',
-        image: resultImage,
+        image: persistedImageUri,
         canRegenerate: true,
         canExport: true,
         generationId: finalGeneration.id,
@@ -273,8 +348,21 @@ export default function ChatScreen() {
         createdAt: Date.now(),
         prompt: payload.prompt || '',
         inputImage: inputImageUri,
-        resultImage,
+        resultImage: persistedImageUri,
+        generationId: finalGeneration.id,
+        sessionId: finalGeneration.sessionId,
+        sourceGenerationId: finalGeneration.sourceGenerationId || null,
+        type: finalGeneration.type || 'base',
+        generationMode: finalGeneration.generationMode || 'balanced',
       });
+
+      if (autoSaveEnabled) {
+        try {
+          await saveImageToGallery(persistedImageUri);
+        } catch (autoSaveError) {
+          console.log('autoSave generated image error:', autoSaveError);
+        }
+      }
 
       await loadUsage();
     } catch (error: any) {
@@ -306,6 +394,11 @@ export default function ChatScreen() {
 
   const sendMessage = async () => {
     if ((!input.trim() && !selectedImage) || loading) return;
+
+    if (usage && usage.remainingToday <= 0) {
+      openInfoSheet('limit');
+      return;
+    }
 
     const payload: GeneratePayload = {
       prompt: input.trim(),
@@ -339,28 +432,39 @@ export default function ChatScreen() {
 
   const bottomOffset = keyboardHeight > 0 ? keyboardHeight + KEYBOARD_GAP : insets.bottom;
 
-  const usageHeadline = useMemo(() => {
+  const isLimitReached = !!usage && usage.remainingToday <= 0;
+
+  const usageTitle = useMemo(() => {
     if (!usage) {
-      return 'Free plan • 2 medium images per day';
+      return '2 free images left today';
     }
 
     if (usage.remainingToday <= 0) {
-      return 'Free limit used for today';
+      return 'Free limit reached for today';
     }
 
-    return `${usage.remainingToday} of ${usage.dailyLimit} free images left today`;
+    if (usage.remainingToday === 1) {
+      return '1 free image left today';
+    }
+
+    return `${usage.remainingToday} free images left today`;
   }, [usage]);
 
-  const usageSubline = useMemo(() => {
+  const usageSubtitle = useMemo(() => {
     if (!usage) {
-      return 'Premium will be added later through Google Play Billing.';
+      return 'Medium mode included in free plan';
     }
 
     if (usage.remainingToday <= 0) {
-      return 'Come back tomorrow or wait for Premium in a later build.';
+      return 'Come back tomorrow to generate more images';
     }
 
-    return 'Current mode: Medium. Variations and Premium are not active in this build.';
+    return `${usage.dailyLimit - usage.remainingToday}/${usage.dailyLimit} used today`;
+  }, [usage]);
+
+  const usageProgress = useMemo(() => {
+    if (!usage || !usage.dailyLimit) return 1;
+    return Math.max(0, Math.min(1, usage.remainingToday / usage.dailyLimit));
   }, [usage]);
 
   const sheetTitle =
@@ -401,7 +505,11 @@ export default function ChatScreen() {
         {!isUser && item.image && (item.canRegenerate || item.canExport) ? (
           <View style={styles.actionRow}>
             {item.canRegenerate ? (
-              <Pressable onPress={regenerateFromMessage} style={styles.actionButton} disabled={loading}>
+              <Pressable
+                onPress={regenerateFromMessage}
+                style={styles.actionButton}
+                disabled={loading}
+              >
                 <Ionicons name="sparkles-outline" size={16} color="#ffffff" />
                 <Text style={styles.actionButtonText}>Variation</Text>
               </Pressable>
@@ -430,13 +538,46 @@ export default function ChatScreen() {
     <View style={styles.container}>
       <TopBar title="SketchIT" showHistory showSettings />
 
+      <View style={[styles.usageBarWrap, isLimitReached && styles.usageBarWrapReached]}>
+        <View style={styles.usageBarHeader}>
+          <View style={styles.usageTextBlock}>
+            <Text style={[styles.usageBarTitle, isLimitReached && styles.usageBarTitleReached]}>
+              {usageTitle}
+            </Text>
+            <Text
+              style={[
+                styles.usageBarSubtitle,
+                isLimitReached && styles.usageBarSubtitleReached,
+              ]}
+            >
+              {usageSubtitle}
+            </Text>
+          </View>
+          <Text style={[styles.usageBarMode, isLimitReached && styles.usageBarModeReached]}>
+            Medium
+          </Text>
+        </View>
+
+        <View style={[styles.usageTrack, isLimitReached && styles.usageTrackReached]}>
+          <View
+            style={[
+              styles.usageFill,
+              isLimitReached
+                ? styles.usageFillReached
+                : { width: `${usageProgress * 100}%` },
+            ]}
+          />
+        </View>
+      </View>
+
       <FlatList
         ref={flatListRef}
         data={messages}
         renderItem={renderMessage}
         keyExtractor={(item) => item.id}
         contentContainerStyle={{
-          padding: 16,
+          paddingHorizontal: 16,
+          paddingTop: 12,
           paddingBottom: 210,
         }}
         keyboardShouldPersistTaps="handled"
@@ -444,41 +585,37 @@ export default function ChatScreen() {
         onContentSizeChange={() => scrollToBottom(false)}
         ListHeaderComponent={
           <>
-            <View style={styles.heroCard}>
-              <Text style={styles.heroTitle}>Sketch to image</Text>
-              <Text style={styles.heroSubtitle}>Attach a sketch, write a short prompt, generate a realistic result.</Text>
-            </View>
-
-            <View style={[styles.limitCard, usage?.remainingToday === 0 && styles.limitCardMuted]}>
-              <View style={styles.limitHeaderRow}>
-                <View style={styles.limitBadge}>
-                  <Ionicons name="flash-outline" size={14} color="#000000" />
-                  <Text style={styles.limitBadgeText}>Medium</Text>
-                </View>
-                <Text style={styles.limitPill}>Free</Text>
-              </View>
-              <Text style={styles.limitTitle}>{usageHeadline}</Text>
-              <Text style={styles.limitSubtitle}>{usageSubline}</Text>
-            </View>
-
             {messages.length === 0 ? (
-              <View style={styles.tipsSection}>
-                <Text style={styles.tipsLabel}>Quick ideas</Text>
-                <View style={styles.tipList}>
-                  {PROMPT_SUGGESTIONS.map((item) => (
-                    <Pressable key={item} style={styles.tipChip} onPress={() => onPressSuggestion(item)}>
-                      <Text style={styles.tipChipText}>{item}</Text>
-                    </Pressable>
-                  ))}
+              <>
+                <View style={styles.heroMini}>
+                  <Text style={styles.heroMiniTitle}>Sketch to image</Text>
+                  <Text style={styles.heroMiniSubtitle}>
+                    Attach a sketch or write a short prompt to generate a realistic result.
+                  </Text>
                 </View>
-              </View>
+
+                <View style={styles.tipsSection}>
+                  <Text style={styles.tipsLabel}>Quick ideas</Text>
+                  <View style={styles.tipList}>
+                    {PROMPT_SUGGESTIONS.map((item) => (
+                      <Pressable
+                        key={item}
+                        style={styles.tipChip}
+                        onPress={() => onPressSuggestion(item)}
+                      >
+                        <Text style={styles.tipChipText}>{item}</Text>
+                      </Pressable>
+                    ))}
+                  </View>
+                </View>
+              </>
             ) : null}
           </>
         }
       />
 
       {selectedImage ? (
-        <View style={[styles.previewRow, { bottom: bottomOffset + 88 }]}> 
+        <View style={[styles.previewRow, { bottom: bottomOffset + 88 }]}>
           <Pressable onPress={() => setFullscreenImage(selectedImage.uri)}>
             <Image source={{ uri: selectedImage.uri }} style={styles.previewImage} />
           </Pressable>
@@ -494,7 +631,7 @@ export default function ChatScreen() {
         </View>
       ) : null}
 
-      <View style={[styles.inputRow, { bottom: bottomOffset }]}> 
+      <View style={[styles.inputRow, { bottom: bottomOffset }]}>
         <Pressable onPress={openImageOptions} style={styles.plusButton}>
           <Ionicons name="add" size={22} color="#ffffff" />
         </Pressable>
@@ -508,7 +645,11 @@ export default function ChatScreen() {
           multiline
         />
 
-        <Pressable onPress={sendMessage} style={[styles.sendButton, loading && styles.sendButtonDisabled]} disabled={loading}>
+        <Pressable
+          onPress={sendMessage}
+          style={[styles.sendButton, loading && styles.sendButtonDisabled]}
+          disabled={loading}
+        >
           {loading ? (
             <ActivityIndicator size="small" color="#000000" />
           ) : (
@@ -524,13 +665,20 @@ export default function ChatScreen() {
         onRequestClose={() => setFullscreenImage(null)}
       >
         <View style={styles.modalOverlay}>
-          <Pressable style={styles.modalCloseButton} onPress={() => setFullscreenImage(null)}>
+          <Pressable
+            style={styles.modalCloseButton}
+            onPress={() => setFullscreenImage(null)}
+          >
             <Ionicons name="close" size={26} color="#fff" />
           </Pressable>
 
           <View style={styles.modalContent}>
             {fullscreenImage ? (
-              <Image source={{ uri: fullscreenImage }} style={styles.fullscreenImage} resizeMode="contain" />
+              <Image
+                source={{ uri: fullscreenImage }}
+                style={styles.fullscreenImage}
+                resizeMode="contain"
+              />
             ) : null}
           </View>
         </View>
@@ -548,7 +696,10 @@ export default function ChatScreen() {
             <View style={styles.sheetHandle} />
             <Text style={styles.sheetTitle}>{sheetTitle}</Text>
             <Text style={styles.sheetSubtitle}>{sheetSubtitle}</Text>
-            <Pressable style={styles.sheetPrimaryButton} onPress={() => setShowInfoSheet(false)}>
+            <Pressable
+              style={styles.sheetPrimaryButton}
+              onPress={() => setShowInfoSheet(false)}
+            >
               <Text style={styles.sheetPrimaryButtonText}>OK</Text>
             </Pressable>
           </View>
@@ -563,74 +714,89 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#000000',
   },
-  heroCard: {
-    backgroundColor: '#0b0b0c',
-    borderWidth: 1,
-    borderColor: '#1f1f22',
-    borderRadius: 24,
-    padding: 18,
+
+  usageBarWrap: {
+    paddingHorizontal: 16,
+    paddingTop: 8,
+    paddingBottom: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#111111',
+    backgroundColor: '#000000',
+  },
+  usageBarWrapReached: {
+    borderBottomColor: '#1f1f1f',
+  },
+  usageBarHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+  },
+  usageTextBlock: {
+    flex: 1,
+    marginRight: 12,
+  },
+  usageBarTitle: {
+    color: '#ffffff',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  usageBarTitleReached: {
+    color: '#ffffff',
+  },
+  usageBarSubtitle: {
+    marginTop: 2,
+    color: '#7d7d84',
+    fontSize: 12,
+    fontWeight: '500',
+  },
+  usageBarSubtitleReached: {
+    color: '#9a9aa2',
+  },
+  usageBarMode: {
+    color: '#8f8f95',
+    fontSize: 12,
+    fontWeight: '700',
+    letterSpacing: 0.4,
+    textTransform: 'uppercase',
+  },
+  usageBarModeReached: {
+    color: '#b3b3b8',
+  },
+  usageTrack: {
+    height: 8,
+    borderRadius: 999,
+    backgroundColor: '#131315',
+    overflow: 'hidden',
+  },
+  usageTrackReached: {
+    backgroundColor: '#1a1a1d',
+  },
+  usageFill: {
+    height: '100%',
+    borderRadius: 999,
+    backgroundColor: '#ffffff',
+  },
+  usageFillReached: {
+    width: '100%',
+    backgroundColor: '#3a3a3f',
+  },
+
+  heroMini: {
     marginBottom: 14,
   },
-  heroTitle: {
+  heroMiniTitle: {
     color: '#ffffff',
-    fontSize: 24,
+    fontSize: 22,
     fontWeight: '700',
     marginBottom: 6,
   },
-  heroSubtitle: {
-    color: '#a1a1aa',
+  heroMiniSubtitle: {
+    color: '#9a9aa2',
     fontSize: 14,
     lineHeight: 21,
   },
-  limitCard: {
-    backgroundColor: '#101012',
-    borderWidth: 1,
-    borderColor: '#232327',
-    borderRadius: 22,
-    padding: 16,
-    marginBottom: 14,
-  },
-  limitCardMuted: {
-    borderColor: '#39393f',
-  },
-  limitHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 10,
-  },
-  limitBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: '#ffffff',
-    borderRadius: 999,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-  },
-  limitBadgeText: {
-    color: '#000000',
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  limitPill: {
-    color: '#a1a1aa',
-    fontSize: 12,
-    fontWeight: '700',
-    letterSpacing: 0.6,
-    textTransform: 'uppercase',
-  },
-  limitTitle: {
-    color: '#ffffff',
-    fontSize: 18,
-    fontWeight: '700',
-    marginBottom: 6,
-  },
-  limitSubtitle: {
-    color: '#8f8f95',
-    fontSize: 13,
-    lineHeight: 20,
-  },
+
   tipsSection: {
     marginBottom: 10,
   },
@@ -660,6 +826,7 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
   },
+
   message: {
     maxWidth: '88%',
     borderRadius: 20,
@@ -700,6 +867,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#111111',
     marginBottom: 10,
   },
+
   actionRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -722,6 +890,7 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
   },
+
   previewRow: {
     position: 'absolute',
     left: 12,
@@ -763,6 +932,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+
   inputRow: {
     position: 'absolute',
     left: 0,
@@ -801,6 +971,7 @@ const styles = StyleSheet.create({
   sendButtonDisabled: {
     opacity: 0.7,
   },
+
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.96)',
@@ -828,6 +999,7 @@ const styles = StyleSheet.create({
     width: '100%',
     height: '100%',
   },
+
   sheetOverlay: {
     flex: 1,
     justifyContent: 'flex-end',

@@ -18,15 +18,79 @@ import { saveImageToGallery, shareImageFile } from '../lib/imageExport';
 export default function HistoryScreen() {
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [fullscreenImage, setFullscreenImage] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
-  const loadHistory = async () => {
-    const items = await loadHistoryItems();
-    setHistory(items);
-  };
+  const loadHistory = useCallback(async (showAlertOnError = false) => {
+    try {
+      setIsLoading(true);
+      setLoadError(null);
+
+      const items = await loadHistoryItems();
+
+      if (Array.isArray(items)) {
+        setHistory(items);
+      } else {
+        setHistory([]);
+      }
+    } catch (error: any) {
+      console.log('HistoryScreen loadHistory error:', error);
+
+      setHistory([]);
+      setLoadError(
+        'The history could not be loaded. This is likely caused by an old oversized saved entry.'
+      );
+
+      if (showAlertOnError) {
+        Alert.alert(
+          'History error',
+          'The history could not be loaded. This is likely caused by an old oversized saved entry.'
+        );
+      }
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
 
   useFocusEffect(
     useCallback(() => {
-      loadHistory();
+      let isActive = true;
+
+      const run = async () => {
+        try {
+          setIsLoading(true);
+          setLoadError(null);
+
+          const items = await loadHistoryItems();
+
+          if (!isActive) return;
+
+          if (Array.isArray(items)) {
+            setHistory(items);
+          } else {
+            setHistory([]);
+          }
+        } catch (error: any) {
+          if (!isActive) return;
+
+          console.log('HistoryScreen useFocusEffect load error:', error);
+
+          setHistory([]);
+          setLoadError(
+            'The history could not be loaded. This is likely caused by an old oversized saved entry.'
+          );
+        } finally {
+          if (isActive) {
+            setIsLoading(false);
+          }
+        }
+      };
+
+      run();
+
+      return () => {
+        isActive = false;
+      };
     }, [])
   );
 
@@ -34,26 +98,33 @@ export default function HistoryScreen() {
     try {
       await shareImageFile(imageUri);
     } catch (error: any) {
-      Alert.alert('Fehler', error?.message || 'Das Bild konnte nicht geteilt werden.');
+      Alert.alert('Error', error?.message || 'The image could not be shared.');
     }
   };
 
   const onSaveImage = async (imageUri: string) => {
     try {
       await saveImageToGallery(imageUri);
-      Alert.alert('Gespeichert', 'Das Bild wurde in deiner Galerie gespeichert.');
+      Alert.alert('Saved', 'The image was saved to your gallery.');
     } catch (error: any) {
-      Alert.alert('Fehler', error?.message || 'Das Bild konnte nicht gespeichert werden.');
+      Alert.alert('Error', error?.message || 'The image could not be saved.');
     }
   };
 
   const renderItem = ({ item }: { item: HistoryItem }) => {
     const date = new Date(item.createdAt);
+    const resultImage = (item as any).resultImage || (item as any).imageUrl || '';
 
     return (
       <View style={styles.card}>
-        <Pressable onPress={() => setFullscreenImage(item.resultImage)}>
-          <Image source={{ uri: item.resultImage }} style={styles.image} />
+        <Pressable
+          onPress={() => {
+            if (resultImage) {
+              setFullscreenImage(resultImage);
+            }
+          }}
+        >
+          <Image source={{ uri: resultImage }} style={styles.image} />
         </Pressable>
 
         <Text style={styles.prompt} numberOfLines={2}>
@@ -66,19 +137,19 @@ export default function HistoryScreen() {
 
         <View style={styles.actionRow}>
           <Pressable
-            onPress={() => onShareImage(item.resultImage)}
+            onPress={() => onShareImage(resultImage)}
             style={styles.actionButton}
           >
             <Ionicons name="share-outline" size={16} color="#ffffff" />
-            <Text style={styles.actionButtonText}>Teilen</Text>
+            <Text style={styles.actionButtonText}>Share</Text>
           </Pressable>
 
           <Pressable
-            onPress={() => onSaveImage(item.resultImage)}
+            onPress={() => onSaveImage(resultImage)}
             style={styles.actionButton}
           >
             <Ionicons name="download-outline" size={16} color="#ffffff" />
-            <Text style={styles.actionButtonText}>Speichern</Text>
+            <Text style={styles.actionButtonText}>Save</Text>
           </Pressable>
         </View>
       </View>
@@ -89,18 +160,36 @@ export default function HistoryScreen() {
     <View style={styles.container}>
       <TopBar title="History" showBack />
 
-      {history.length === 0 ? (
+      {isLoading ? (
+        <View style={styles.content}>
+          <Text style={styles.title}>Loading history...</Text>
+          <Text style={styles.subtitle}>Please wait a moment.</Text>
+        </View>
+      ) : loadError ? (
+        <View style={styles.content}>
+          <Text style={styles.title}>History unavailable</Text>
+          <Text style={styles.subtitle}>{loadError}</Text>
+
+          <Pressable
+            style={styles.retryButton}
+            onPress={() => loadHistory(true)}
+          >
+            <Ionicons name="refresh-outline" size={16} color="#ffffff" />
+            <Text style={styles.retryButtonText}>Try again</Text>
+          </Pressable>
+        </View>
+      ) : history.length === 0 ? (
         <View style={styles.content}>
           <Text style={styles.title}>No history yet</Text>
           <Text style={styles.subtitle}>
-            Your generated sketches will appear here.
+            Your generated images will appear here.
           </Text>
         </View>
       ) : (
         <FlatList
           data={history}
           renderItem={renderItem}
-          keyExtractor={(item) => item.id}
+          keyExtractor={(item, index) => item.id || String(index)}
           contentContainerStyle={{ padding: 16, paddingBottom: 100 }}
           showsVerticalScrollIndicator={false}
         />
@@ -151,12 +240,33 @@ const styles = StyleSheet.create({
     fontSize: 20,
     fontWeight: '700',
     marginBottom: 10,
+    textAlign: 'center',
   },
 
   subtitle: {
     color: '#a1a1aa',
     fontSize: 14,
     textAlign: 'center',
+    lineHeight: 20,
+  },
+
+  retryButton: {
+    marginTop: 18,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 999,
+    backgroundColor: '#1a1a1a',
+    borderWidth: 1,
+    borderColor: '#2a2a2a',
+  },
+
+  retryButtonText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '600',
   },
 
   card: {
