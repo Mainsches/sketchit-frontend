@@ -9,6 +9,7 @@ import {
   Alert,
   FlatList,
   Image,
+  InteractionManager,
   Keyboard,
   Modal,
   Pressable,
@@ -53,7 +54,7 @@ type SelectedImage = {
   mimeType: string;
 };
 
-type SheetReason = 'limit' | 'variation' | 'coming_soon';
+type SheetReason = 'variation' | 'coming_soon';
 
 const KEYBOARD_GAP = 48;
 const POLL_INTERVAL_MS = 1800;
@@ -116,30 +117,32 @@ export default function ChatScreen() {
   const [usage, setUsage] = useState<UsageInfo | null>(null);
   const [showInfoSheet, setShowInfoSheet] = useState(false);
   const [sheetReason, setSheetReason] = useState<SheetReason>('coming_soon');
-  const [hasShownLimitSheetThisOpen, setHasShownLimitSheetThisOpen] = useState(false);
   const [autoSaveEnabled, setAutoSaveEnabled] = useState(false);
+  const [chatLocked, setChatLocked] = useState(false);
+  const [usageLoaded, setUsageLoaded] = useState(false);
 
   const flatListRef = useRef<FlatList<Message>>(null);
   const insets = useSafeAreaInsets();
 
-  const scrollToBottom = (animated = true) => {
+  const scheduleScrollToBottom = useCallback((animated = true) => {
     requestAnimationFrame(() => {
       flatListRef.current?.scrollToEnd({ animated });
     });
-  };
+
+    InteractionManager.runAfterInteractions(() => {
+      flatListRef.current?.scrollToEnd({ animated });
+      setTimeout(() => {
+        flatListRef.current?.scrollToEnd({ animated });
+      }, 80);
+      setTimeout(() => {
+        flatListRef.current?.scrollToEnd({ animated });
+      }, 220);
+    });
+  }, []);
 
   const openInfoSheet = useCallback((reason: SheetReason) => {
     setSheetReason(reason);
     setShowInfoSheet(true);
-  }, []);
-
-  const loadUsage = useCallback(async () => {
-    try {
-      const nextUsage = await fetchUsage();
-      setUsage(nextUsage);
-    } catch (error) {
-      console.log('loadUsage error:', error);
-    }
   }, []);
 
   const loadAutoSaveSetting = useCallback(async () => {
@@ -152,60 +155,81 @@ export default function ChatScreen() {
     }
   }, []);
 
+  const loadUsageOnly = useCallback(async () => {
+    try {
+      const nextUsage = await fetchUsage();
+      setUsage(nextUsage);
+      return nextUsage;
+    } catch (error) {
+      console.log('loadUsage error:', error);
+      return null;
+    }
+  }, []);
+
   useEffect(() => {
-    loadUsage();
     loadAutoSaveSetting();
-  }, [loadUsage, loadAutoSaveSetting]);
+  }, [loadAutoSaveSetting]);
 
   useFocusEffect(
     useCallback(() => {
-      setHasShownLimitSheetThisOpen(false);
-      loadUsage();
-      loadAutoSaveSetting();
-    }, [loadUsage, loadAutoSaveSetting])
-  );
+      let isActive = true;
 
-  useEffect(() => {
-    if (
-      usage &&
-      usage.remainingToday <= 0 &&
-      !showInfoSheet &&
-      !hasShownLimitSheetThisOpen
-    ) {
-      setHasShownLimitSheetThisOpen(true);
-      openInfoSheet('limit');
-    }
-  }, [usage, showInfoSheet, hasShownLimitSheetThisOpen, openInfoSheet]);
+      const run = async () => {
+        setUsageLoaded(false);
+
+        const nextUsage = await loadUsageOnly();
+
+        if (!isActive) return;
+
+        await loadAutoSaveSetting();
+
+        const locked = !!nextUsage && nextUsage.remainingToday <= 0;
+        setChatLocked(locked);
+        setUsageLoaded(true);
+      };
+
+      run();
+
+      return () => {
+        isActive = false;
+      };
+    }, [loadUsageOnly, loadAutoSaveSetting])
+  );
 
   useEffect(() => {
     const showSub = Keyboard.addListener('keyboardDidShow', (e) => {
       setKeyboardHeight(e.endCoordinates.height);
-      scrollToBottom(false);
+      scheduleScrollToBottom(false);
     });
 
     const hideSub = Keyboard.addListener('keyboardDidHide', () => {
       setKeyboardHeight(0);
+      scheduleScrollToBottom(false);
     });
 
     return () => {
       showSub.remove();
       hideSub.remove();
     };
-  }, []);
+  }, [scheduleScrollToBottom]);
 
   useEffect(() => {
     if (selectedImage) {
-      scrollToBottom(true);
+      scheduleScrollToBottom(true);
     }
-  }, [selectedImage]);
+  }, [selectedImage, scheduleScrollToBottom]);
 
   useEffect(() => {
     if (messages.length > 0) {
-      scrollToBottom(true);
+      scheduleScrollToBottom(true);
     }
-  }, [messages.length]);
+  }, [messages.length, scheduleScrollToBottom]);
 
   const openImageOptions = () => {
+    if (chatLocked) {
+      return;
+    }
+
     Alert.alert('Attach sketch', 'Choose how you want to attach your sketch.', [
       { text: 'Cancel', style: 'cancel' },
       { text: 'Camera', onPress: openCamera },
@@ -273,7 +297,7 @@ export default function ChatScreen() {
   const onSaveImage = async (imageUri: string) => {
     try {
       await saveImageToGallery(imageUri);
-      Alert.alert('Saved', 'The image has been saved to your gallery.');
+      Alert.alert('Saved', 'The image has been saved to the SketchIT album.');
     } catch (error: any) {
       Alert.alert('Error', error?.message || 'Could not save the image.');
     }
@@ -305,6 +329,7 @@ export default function ChatScreen() {
       };
 
       setMessages((prev) => [...prev, loadingMessage]);
+      scheduleScrollToBottom(true);
 
       const start = await startGeneration({
         prompt: payload.prompt,
@@ -364,7 +389,11 @@ export default function ChatScreen() {
         }
       }
 
-      await loadUsage();
+      const refreshedUsage = await loadUsageOnly();
+
+      if (refreshedUsage && refreshedUsage.remainingToday <= 0) {
+        setChatLocked(true);
+      }
     } catch (error: any) {
       console.log('Generate error:', error);
       setMessages((prev) => prev.filter((item) => item.id !== loadingMessageId));
@@ -372,10 +401,9 @@ export default function ChatScreen() {
       if (error instanceof ApiError) {
         if (error.usage) {
           setUsage(error.usage);
-        }
-
-        if (error.code === 'DAILY_LIMIT_REACHED') {
-          openInfoSheet('limit');
+          if (error.usage.remainingToday <= 0) {
+            setChatLocked(true);
+          }
         }
       }
 
@@ -388,15 +416,16 @@ export default function ChatScreen() {
       setMessages((prev) => [...prev, errorMessage]);
     } finally {
       setLoading(false);
-      scrollToBottom(true);
+      scheduleScrollToBottom(true);
     }
   };
 
   const sendMessage = async () => {
+    if (chatLocked) return;
     if ((!input.trim() && !selectedImage) || loading) return;
 
     if (usage && usage.remainingToday <= 0) {
-      openInfoSheet('limit');
+      setChatLocked(true);
       return;
     }
 
@@ -423,7 +452,9 @@ export default function ChatScreen() {
   };
 
   const onPressSuggestion = (value: string) => {
+    if (chatLocked) return;
     setInput(value);
+    setTimeout(() => scheduleScrollToBottom(true), 60);
   };
 
   const regenerateFromMessage = async () => {
@@ -431,7 +462,6 @@ export default function ChatScreen() {
   };
 
   const bottomOffset = keyboardHeight > 0 ? keyboardHeight + KEYBOARD_GAP : insets.bottom;
-
   const isLimitReached = !!usage && usage.remainingToday <= 0;
 
   const usageTitle = useMemo(() => {
@@ -468,16 +498,12 @@ export default function ChatScreen() {
   }, [usage]);
 
   const sheetTitle =
-    sheetReason === 'limit'
-      ? 'Your free limit is used up'
-      : sheetReason === 'variation'
+    sheetReason === 'variation'
       ? 'Variations are coming later'
       : 'Premium is coming later';
 
   const sheetSubtitle =
-    sheetReason === 'limit'
-      ? 'This internal build includes 2 medium images per day. Premium is not enabled yet.'
-      : sheetReason === 'variation'
+    sheetReason === 'variation'
       ? 'Variations will be enabled later together with Google Play Billing.'
       : 'This build is focused on testing the core generation flow first.';
 
@@ -534,6 +560,22 @@ export default function ChatScreen() {
     );
   };
 
+  const renderLockedContent = () => {
+    return (
+      <View style={styles.lockedWrap}>
+        <View style={styles.lockedCard}>
+          <View style={styles.lockedIcon}>
+            <Ionicons name="lock-closed-outline" size={22} color="#ffffff" />
+          </View>
+          <Text style={styles.lockedTitle}>No free images left today</Text>
+          <Text style={styles.lockedSubtitle}>
+            You have used your 2 free images for today. Come back tomorrow to open the chat again.
+          </Text>
+        </View>
+      </View>
+    );
+  };
+
   return (
     <View style={styles.container}>
       <TopBar title="SketchIT" showHistory showSettings />
@@ -570,93 +612,105 @@ export default function ChatScreen() {
         </View>
       </View>
 
-      <FlatList
-        ref={flatListRef}
-        data={messages}
-        renderItem={renderMessage}
-        keyExtractor={(item) => item.id}
-        contentContainerStyle={{
-          paddingHorizontal: 16,
-          paddingTop: 12,
-          paddingBottom: 210,
-        }}
-        keyboardShouldPersistTaps="handled"
-        showsVerticalScrollIndicator={false}
-        onContentSizeChange={() => scrollToBottom(false)}
-        ListHeaderComponent={
-          <>
-            {messages.length === 0 ? (
-              <>
-                <View style={styles.heroMini}>
-                  <Text style={styles.heroMiniTitle}>Sketch to image</Text>
-                  <Text style={styles.heroMiniSubtitle}>
-                    Attach a sketch or write a short prompt to generate a realistic result.
-                  </Text>
-                </View>
-
-                <View style={styles.tipsSection}>
-                  <Text style={styles.tipsLabel}>Quick ideas</Text>
-                  <View style={styles.tipList}>
-                    {PROMPT_SUGGESTIONS.map((item) => (
-                      <Pressable
-                        key={item}
-                        style={styles.tipChip}
-                        onPress={() => onPressSuggestion(item)}
-                      >
-                        <Text style={styles.tipChipText}>{item}</Text>
-                      </Pressable>
-                    ))}
-                  </View>
-                </View>
-              </>
-            ) : null}
-          </>
-        }
-      />
-
-      {selectedImage ? (
-        <View style={[styles.previewRow, { bottom: bottomOffset + 88 }]}>
-          <Pressable onPress={() => setFullscreenImage(selectedImage.uri)}>
-            <Image source={{ uri: selectedImage.uri }} style={styles.previewImage} />
-          </Pressable>
-
-          <View style={styles.previewTextWrap}>
-            <Text style={styles.previewTitle}>Sketch attached</Text>
-            <Text style={styles.previewSubtitle}>It will be sent with your prompt.</Text>
-          </View>
-
-          <Pressable onPress={() => setSelectedImage(null)} style={styles.previewClose}>
-            <Ionicons name="close" size={18} color="#ffffff" />
-          </Pressable>
+      {!usageLoaded ? (
+        <View style={styles.initialLoading}>
+          <ActivityIndicator size="small" color="#ffffff" />
+          <Text style={styles.initialLoadingText}>Checking availability…</Text>
         </View>
-      ) : null}
+      ) : chatLocked ? (
+        renderLockedContent()
+      ) : (
+        <>
+          <FlatList
+            ref={flatListRef}
+            data={messages}
+            renderItem={renderMessage}
+            keyExtractor={(item) => item.id}
+            contentContainerStyle={{
+              paddingHorizontal: 16,
+              paddingTop: 12,
+              paddingBottom: 210,
+            }}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+            onContentSizeChange={() => scheduleScrollToBottom(false)}
+            onLayout={() => scheduleScrollToBottom(false)}
+            ListHeaderComponent={
+              <>
+                {messages.length === 0 ? (
+                  <>
+                    <View style={styles.heroMini}>
+                      <Text style={styles.heroMiniTitle}>Sketch to image</Text>
+                      <Text style={styles.heroMiniSubtitle}>
+                        Attach a sketch or write a short prompt to generate a realistic result.
+                      </Text>
+                    </View>
 
-      <View style={[styles.inputRow, { bottom: bottomOffset }]}>
-        <Pressable onPress={openImageOptions} style={styles.plusButton}>
-          <Ionicons name="add" size={22} color="#ffffff" />
-        </Pressable>
+                    <View style={styles.tipsSection}>
+                      <Text style={styles.tipsLabel}>Quick ideas</Text>
+                      <View style={styles.tipList}>
+                        {PROMPT_SUGGESTIONS.map((item) => (
+                          <Pressable
+                            key={item}
+                            style={styles.tipChip}
+                            onPress={() => onPressSuggestion(item)}
+                          >
+                            <Text style={styles.tipChipText}>{item}</Text>
+                          </Pressable>
+                        ))}
+                      </View>
+                    </View>
+                  </>
+                ) : null}
+              </>
+            }
+          />
 
-        <TextInput
-          value={input}
-          onChangeText={setInput}
-          placeholder="Describe your sketch..."
-          placeholderTextColor="#666666"
-          style={styles.input}
-          multiline
-        />
+          {selectedImage ? (
+            <View style={[styles.previewRow, { bottom: bottomOffset + 88 }]}>
+              <Pressable onPress={() => setFullscreenImage(selectedImage.uri)}>
+                <Image source={{ uri: selectedImage.uri }} style={styles.previewImage} />
+              </Pressable>
 
-        <Pressable
-          onPress={sendMessage}
-          style={[styles.sendButton, loading && styles.sendButtonDisabled]}
-          disabled={loading}
-        >
-          {loading ? (
-            <ActivityIndicator size="small" color="#000000" />
-          ) : (
-            <Ionicons name="arrow-up" size={20} color="#000000" />
-          )}
-        </Pressable>
-      </View>
+              <View style={styles.previewTextWrap}>
+                <Text style={styles.previewTitle}>Sketch attached</Text>
+                <Text style={styles.previewSubtitle}>It will be sent with your prompt.</Text>
+              </View>
+
+              <Pressable onPress={() => setSelectedImage(null)} style={styles.previewClose}>
+                <Ionicons name="close" size={18} color="#ffffff" />
+              </Pressable>
+            </View>
+          ) : null}
+
+          <View style={[styles.inputRow, { bottom: bottomOffset }]}>
+            <Pressable onPress={openImageOptions} style={styles.plusButton}>
+              <Ionicons name="add" size={22} color="#ffffff" />
+            </Pressable>
+
+            <TextInput
+              value={input}
+              onChangeText={setInput}
+              placeholder="Describe your sketch..."
+              placeholderTextColor="#666666"
+              style={styles.input}
+              multiline
+            />
+
+            <Pressable
+              onPress={sendMessage}
+              style={[styles.sendButton, loading && styles.sendButtonDisabled]}
+              disabled={loading}
+            >
+              {loading ? (
+                <ActivityIndicator size="small" color="#000000" />
+              ) : (
+                <Ionicons name="arrow-up" size={20} color="#000000" />
+              )}
+            </Pressable>
+          </View>
+        </>
+      )}
 
       <Modal
         visible={!!fullscreenImage}
@@ -692,7 +746,7 @@ export default function ChatScreen() {
       >
         <View style={styles.sheetOverlay}>
           <Pressable style={styles.sheetBackdrop} onPress={() => setShowInfoSheet(false)} />
-          <View style={styles.sheetCard}>
+          <View style={[styles.sheetCard, { paddingBottom: Math.max(insets.bottom, 18) + 18 }]}>
             <View style={styles.sheetHandle} />
             <Text style={styles.sheetTitle}>{sheetTitle}</Text>
             <Text style={styles.sheetSubtitle}>{sheetSubtitle}</Text>
@@ -780,6 +834,54 @@ const styles = StyleSheet.create({
   usageFillReached: {
     width: '100%',
     backgroundColor: '#3a3a3f',
+  },
+
+  initialLoading: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 24,
+  },
+  initialLoadingText: {
+    color: '#9a9aa2',
+    fontSize: 14,
+    marginTop: 10,
+  },
+
+  lockedWrap: {
+    flex: 1,
+    paddingHorizontal: 18,
+    justifyContent: 'center',
+  },
+  lockedCard: {
+    borderRadius: 24,
+    backgroundColor: '#0f0f10',
+    borderWidth: 1,
+    borderColor: '#1d1d1f',
+    padding: 20,
+    alignItems: 'center',
+  },
+  lockedIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: '#171717',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 14,
+  },
+  lockedTitle: {
+    color: '#ffffff',
+    fontSize: 20,
+    fontWeight: '700',
+    textAlign: 'center',
+    marginBottom: 8,
+  },
+  lockedSubtitle: {
+    color: '#9a9aa2',
+    fontSize: 14,
+    lineHeight: 21,
+    textAlign: 'center',
   },
 
   heroMini: {
@@ -1014,7 +1116,6 @@ const styles = StyleSheet.create({
     borderTopRightRadius: 28,
     paddingHorizontal: 20,
     paddingTop: 12,
-    paddingBottom: 28,
     borderTopWidth: 1,
     borderColor: '#1f1f22',
   },
