@@ -7,12 +7,12 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ActivityIndicator,
   Alert,
+  FlatList,
   Image,
   InteractionManager,
   Keyboard,
   Modal,
   Pressable,
-  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -66,6 +66,7 @@ const POLL_INTERVAL_MS = 1800;
 const AUTO_SAVE_SETTING_KEY = 'sketchit_auto_save_generated_images';
 const USAGE_CACHE_KEY = 'sketchit_cached_usage_v1';
 const LOCK_CACHE_KEY = 'sketchit_server_confirmed_lock_v1';
+const LIMIT_POPUP_DAY_KEY = 'sketchit_limit_popup_day_v1';
 
 const PROMPT_SUGGESTIONS = [
   'Minimal white chair with metal legs',
@@ -140,13 +141,17 @@ export default function ChatScreen() {
   const [chatLocked, setChatLocked] = useState(false);
   const [usageLoaded, setUsageLoaded] = useState(false);
 
-  const scrollViewRef = useRef<ScrollView>(null);
+  const flatListRef = useRef<FlatList<Message>>(null);
   const insets = useSafeAreaInsets();
 
   const performScrollToBottom = useCallback((animated = true) => {
     try {
-      scrollViewRef.current?.scrollToEnd({ animated });
-    } catch {}
+      flatListRef.current?.scrollToEnd({ animated });
+    } catch {
+      try {
+        flatListRef.current?.scrollToOffset({ offset: 999999, animated });
+      } catch {}
+    }
   }, []);
 
   const scheduleScrollToBottom = useCallback(
@@ -160,7 +165,6 @@ export default function ChatScreen() {
         setTimeout(() => performScrollToBottom(animated), 300);
         setTimeout(() => performScrollToBottom(animated), 520);
         setTimeout(() => performScrollToBottom(animated), 800);
-        setTimeout(() => performScrollToBottom(animated), 1200);
       });
     },
     [performScrollToBottom]
@@ -220,6 +224,24 @@ export default function ChatScreen() {
     } catch (error) {
       console.log('loadAutoSaveSetting error:', error);
       setAutoSaveEnabled(false);
+    }
+  }, []);
+
+  const markLimitPopupShownForDay = useCallback(async (dayKey: string) => {
+    try {
+      await AsyncStorage.setItem(LIMIT_POPUP_DAY_KEY, dayKey);
+    } catch (error) {
+      console.log('markLimitPopupShownForDay error:', error);
+    }
+  }, []);
+
+  const shouldShowLimitPopupForDay = useCallback(async (dayKey: string) => {
+    try {
+      const storedDay = await AsyncStorage.getItem(LIMIT_POPUP_DAY_KEY);
+      return storedDay !== dayKey;
+    } catch (error) {
+      console.log('shouldShowLimitPopupForDay error:', error);
+      return true;
     }
   }, []);
 
@@ -339,7 +361,9 @@ export default function ChatScreen() {
   }, [messages.length, scheduleScrollToBottom]);
 
   const openImageOptions = () => {
-    if (chatLocked) return;
+    if (chatLocked) {
+      return;
+    }
 
     Alert.alert('Attach sketch', 'Choose how you want to attach your sketch.', [
       { text: 'Cancel', style: 'cancel' },
@@ -427,6 +451,28 @@ export default function ChatScreen() {
     }
   };
 
+  const maybeShowLimitReachedPopup = useCallback(
+    async (finalUsage: UsageInfo) => {
+      if (finalUsage.remainingToday > 0 || finalUsage.pendingCount > 0) {
+        return;
+      }
+
+      const shouldShow = await shouldShowLimitPopupForDay(finalUsage.resetDayKey);
+      if (!shouldShow) {
+        return;
+      }
+
+      await markLimitPopupShownForDay(finalUsage.resetDayKey);
+
+      Alert.alert(
+        'Free images used up',
+        'You have used all free images for today. Your previously created images are saved in History.',
+        [{ text: 'OK' }]
+      );
+    },
+    [markLimitPopupShownForDay, shouldShowLimitPopupForDay]
+  );
+
   const generateImage = async (payload: GeneratePayload, inputImageUri?: string) => {
     const loadingMessageId = `${Date.now()}-loading`;
 
@@ -512,6 +558,7 @@ export default function ChatScreen() {
       ) {
         setChatLocked(true);
         await saveConfirmedLock(true);
+        await maybeShowLimitReachedPopup(refreshed.usage);
       } else if (refreshed.source === 'network') {
         setChatLocked(false);
         await saveConfirmedLock(false);
@@ -644,12 +691,12 @@ export default function ChatScreen() {
       ? 'Variations will be enabled later together with Google Play Billing.'
       : 'This build is focused on testing the core generation flow first.';
 
-  const renderMessage = (item: Message) => {
+  const renderMessage = ({ item }: { item: Message }) => {
     const isUser = item.role === 'user';
     const isLoadingBubble = !isUser && !item.image && item.text?.includes('Generating');
 
     return (
-      <View key={item.id} style={[styles.message, isUser ? styles.userMessage : styles.aiMessage]}>
+      <View style={[styles.message, isUser ? styles.userMessage : styles.aiMessage]}>
         {item.image ? (
           <Pressable onPress={() => setFullscreenImage(item.image!)}>
             <Image source={{ uri: item.image }} style={styles.messageImage} />
@@ -758,43 +805,50 @@ export default function ChatScreen() {
         renderLockedContent()
       ) : (
         <>
-          <ScrollView
-            ref={scrollViewRef}
-            style={styles.scrollView}
-            contentContainerStyle={styles.scrollContent}
+          <FlatList
+            ref={flatListRef}
+            data={messages}
+            renderItem={renderMessage}
+            keyExtractor={(item) => item.id}
+            contentContainerStyle={{
+              paddingHorizontal: 16,
+              paddingTop: 12,
+              paddingBottom: 210,
+            }}
             keyboardShouldPersistTaps="handled"
             showsVerticalScrollIndicator={false}
             onContentSizeChange={() => scheduleScrollToBottom(false)}
             onLayout={() => scheduleScrollToBottom(false)}
-          >
-            {messages.length === 0 ? (
+            ListHeaderComponent={
               <>
-                <View style={styles.heroMini}>
-                  <Text style={styles.heroMiniTitle}>Sketch to image</Text>
-                  <Text style={styles.heroMiniSubtitle}>
-                    Attach a sketch or write a short prompt to generate a realistic result.
-                  </Text>
-                </View>
+                {messages.length === 0 ? (
+                  <>
+                    <View style={styles.heroMini}>
+                      <Text style={styles.heroMiniTitle}>Sketch to image</Text>
+                      <Text style={styles.heroMiniSubtitle}>
+                        Attach a sketch or write a short prompt to generate a realistic result.
+                      </Text>
+                    </View>
 
-                <View style={styles.tipsSection}>
-                  <Text style={styles.tipsLabel}>Quick ideas</Text>
-                  <View style={styles.tipList}>
-                    {PROMPT_SUGGESTIONS.map((item) => (
-                      <Pressable
-                        key={item}
-                        style={styles.tipChip}
-                        onPress={() => onPressSuggestion(item)}
-                      >
-                        <Text style={styles.tipChipText}>{item}</Text>
-                      </Pressable>
-                    ))}
-                  </View>
-                </View>
+                    <View style={styles.tipsSection}>
+                      <Text style={styles.tipsLabel}>Quick ideas</Text>
+                      <View style={styles.tipList}>
+                        {PROMPT_SUGGESTIONS.map((item) => (
+                          <Pressable
+                            key={item}
+                            style={styles.tipChip}
+                            onPress={() => onPressSuggestion(item)}
+                          >
+                            <Text style={styles.tipChipText}>{item}</Text>
+                          </Pressable>
+                        ))}
+                      </View>
+                    </View>
+                  </>
+                ) : null}
               </>
-            ) : null}
-
-            {messages.map(renderMessage)}
-          </ScrollView>
+            }
+          />
 
           {selectedImage ? (
             <View style={[styles.previewRow, { bottom: bottomOffset + 88 }]}>
@@ -897,15 +951,6 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#000000',
-  },
-
-  scrollView: {
-    flex: 1,
-  },
-  scrollContent: {
-    paddingHorizontal: 16,
-    paddingTop: 12,
-    paddingBottom: 210,
   },
 
   usageBarWrap: {
