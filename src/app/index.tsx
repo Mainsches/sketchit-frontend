@@ -56,9 +56,15 @@ type SelectedImage = {
 
 type SheetReason = 'variation' | 'coming_soon';
 
+type UsageLoadResult = {
+  usage: UsageInfo | null;
+  source: 'network' | 'cache' | 'none';
+};
+
 const KEYBOARD_GAP = 48;
 const POLL_INTERVAL_MS = 1800;
 const AUTO_SAVE_SETTING_KEY = 'sketchit_auto_save_generated_images';
+const USAGE_CACHE_KEY = 'sketchit_cached_usage_v1';
 
 const PROMPT_SUGGESTIONS = [
   'Minimal white chair with metal legs',
@@ -101,10 +107,22 @@ async function persistDataUrlToLocalFile(
   const fileUri = `${writableDir}sketchit_${Date.now()}.${ext}`;
 
   await FileSystem.writeAsStringAsync(fileUri, base64Data, {
-    encoding: FileSystem.EncodingType.Base64,
+    encoding: 'base64',
   });
 
   return fileUri;
+}
+
+function isUsageInfo(value: unknown): value is UsageInfo {
+  if (!value || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.sessionId === 'string' &&
+    typeof v.dailyCount === 'number' &&
+    typeof v.pendingCount === 'number' &&
+    typeof v.dailyLimit === 'number' &&
+    typeof v.remainingToday === 'number'
+  );
 }
 
 export default function ChatScreen() {
@@ -124,25 +142,55 @@ export default function ChatScreen() {
   const flatListRef = useRef<FlatList<Message>>(null);
   const insets = useSafeAreaInsets();
 
-  const scheduleScrollToBottom = useCallback((animated = true) => {
-    requestAnimationFrame(() => {
+  const performScrollToBottom = useCallback((animated = true) => {
+    try {
       flatListRef.current?.scrollToEnd({ animated });
-    });
+    } catch {
+      try {
+        flatListRef.current?.scrollToOffset({ offset: 999999, animated });
+      } catch {}
+    }
+  }, []);
+
+  const scheduleScrollToBottom = useCallback((animated = true) => {
+    requestAnimationFrame(() => performScrollToBottom(animated));
 
     InteractionManager.runAfterInteractions(() => {
-      flatListRef.current?.scrollToEnd({ animated });
-      setTimeout(() => {
-        flatListRef.current?.scrollToEnd({ animated });
-      }, 80);
-      setTimeout(() => {
-        flatListRef.current?.scrollToEnd({ animated });
-      }, 220);
+      performScrollToBottom(animated);
+      setTimeout(() => performScrollToBottom(animated), 60);
+      setTimeout(() => performScrollToBottom(animated), 180);
+      setTimeout(() => performScrollToBottom(animated), 320);
+      setTimeout(() => performScrollToBottom(animated), 520);
     });
-  }, []);
+  }, [performScrollToBottom]);
 
   const openInfoSheet = useCallback((reason: SheetReason) => {
     setSheetReason(reason);
     setShowInfoSheet(true);
+  }, []);
+
+  const saveUsageCache = useCallback(async (nextUsage: UsageInfo) => {
+    try {
+      await AsyncStorage.setItem(USAGE_CACHE_KEY, JSON.stringify(nextUsage));
+    } catch (error) {
+      console.log('saveUsageCache error:', error);
+    }
+  }, []);
+
+  const loadCachedUsage = useCallback(async (): Promise<UsageInfo | null> => {
+    try {
+      const raw = await AsyncStorage.getItem(USAGE_CACHE_KEY);
+      if (!raw) return null;
+
+      const parsed: unknown = JSON.parse(raw);
+      if (isUsageInfo(parsed)) {
+        return parsed;
+      }
+      return null;
+    } catch (error) {
+      console.log('loadCachedUsage error:', error);
+      return null;
+    }
   }, []);
 
   const loadAutoSaveSetting = useCallback(async () => {
@@ -155,16 +203,24 @@ export default function ChatScreen() {
     }
   }, []);
 
-  const loadUsageOnly = useCallback(async () => {
+  const loadUsageOnly = useCallback(async (): Promise<UsageLoadResult> => {
     try {
       const nextUsage = await fetchUsage();
       setUsage(nextUsage);
-      return nextUsage;
+      await saveUsageCache(nextUsage);
+      return { usage: nextUsage, source: 'network' };
     } catch (error) {
       console.log('loadUsage error:', error);
-      return null;
+
+      const cachedUsage = await loadCachedUsage();
+      if (cachedUsage) {
+        setUsage(cachedUsage);
+        return { usage: cachedUsage, source: 'cache' };
+      }
+
+      return { usage: null, source: 'none' };
     }
-  }, []);
+  }, [loadCachedUsage, saveUsageCache]);
 
   useEffect(() => {
     loadAutoSaveSetting();
@@ -177,15 +233,26 @@ export default function ChatScreen() {
       const run = async () => {
         setUsageLoaded(false);
 
-        const nextUsage = await loadUsageOnly();
+        const result = await loadUsageOnly();
 
         if (!isActive) return;
 
         await loadAutoSaveSetting();
 
-        const locked = !!nextUsage && nextUsage.remainingToday <= 0;
-        setChatLocked(locked);
+        const shouldLock =
+          result.source === 'network' &&
+          !!result.usage &&
+          result.usage.remainingToday <= 0 &&
+          result.usage.pendingCount <= 0;
+
+        setChatLocked(shouldLock);
         setUsageLoaded(true);
+
+        setTimeout(() => {
+          if (isActive) {
+            scheduleScrollToBottom(false);
+          }
+        }, 80);
       };
 
       run();
@@ -193,7 +260,7 @@ export default function ChatScreen() {
       return () => {
         isActive = false;
       };
-    }, [loadUsageOnly, loadAutoSaveSetting])
+    }, [loadUsageOnly, loadAutoSaveSetting, scheduleScrollToBottom])
   );
 
   useEffect(() => {
@@ -340,6 +407,7 @@ export default function ChatScreen() {
 
       if (start.usage) {
         setUsage(start.usage);
+        await saveUsageCache(start.usage);
       }
 
       const finalGeneration = await pollUntilFinished(start.generation.id);
@@ -367,6 +435,7 @@ export default function ChatScreen() {
       };
 
       setMessages((prev) => [...prev, aiMessage]);
+      scheduleScrollToBottom(true);
 
       await saveHistoryItem({
         id: `history-${Date.now()}`,
@@ -389,9 +458,14 @@ export default function ChatScreen() {
         }
       }
 
-      const refreshedUsage = await loadUsageOnly();
+      const refreshed = await loadUsageOnly();
 
-      if (refreshedUsage && refreshedUsage.remainingToday <= 0) {
+      if (
+        refreshed.source === 'network' &&
+        refreshed.usage &&
+        refreshed.usage.remainingToday <= 0 &&
+        refreshed.usage.pendingCount <= 0
+      ) {
         setChatLocked(true);
       }
     } catch (error: any) {
@@ -401,9 +475,15 @@ export default function ChatScreen() {
       if (error instanceof ApiError) {
         if (error.usage) {
           setUsage(error.usage);
-          if (error.usage.remainingToday <= 0) {
+          await saveUsageCache(error.usage);
+          if (
+            (error.code === 'DAILY_LIMIT_REACHED' || error.usage.remainingToday <= 0) &&
+            error.usage.pendingCount <= 0
+          ) {
             setChatLocked(true);
           }
+        } else if (error.code === 'DAILY_LIMIT_REACHED') {
+          setChatLocked(true);
         }
       }
 
@@ -414,6 +494,7 @@ export default function ChatScreen() {
       };
 
       setMessages((prev) => [...prev, errorMessage]);
+      scheduleScrollToBottom(true);
     } finally {
       setLoading(false);
       scheduleScrollToBottom(true);
@@ -424,8 +505,7 @@ export default function ChatScreen() {
     if (chatLocked) return;
     if ((!input.trim() && !selectedImage) || loading) return;
 
-    if (usage && usage.remainingToday <= 0) {
-      setChatLocked(true);
+    if (usage && usage.remainingToStart <= 0) {
       return;
     }
 
@@ -445,6 +525,8 @@ export default function ChatScreen() {
     };
 
     setMessages((prev) => [...prev, userMessage]);
+    scheduleScrollToBottom(true);
+
     setInput('');
     setSelectedImage(null);
 
@@ -462,14 +544,14 @@ export default function ChatScreen() {
   };
 
   const bottomOffset = keyboardHeight > 0 ? keyboardHeight + KEYBOARD_GAP : insets.bottom;
-  const isLimitReached = !!usage && usage.remainingToday <= 0;
+  const isLimitReached = !!usage && usage.remainingToday <= 0 && usage.pendingCount <= 0;
 
   const usageTitle = useMemo(() => {
     if (!usage) {
       return '2 free images left today';
     }
 
-    if (usage.remainingToday <= 0) {
+    if (usage.remainingToday <= 0 && usage.pendingCount <= 0) {
       return 'Free limit reached for today';
     }
 
@@ -485,11 +567,15 @@ export default function ChatScreen() {
       return 'Medium mode included in free plan';
     }
 
+    if (usage.pendingCount > 0) {
+      return `${usage.dailyCount}/${usage.dailyLimit} used today • ${usage.pendingCount} generating`;
+    }
+
     if (usage.remainingToday <= 0) {
       return 'Come back tomorrow to generate more images';
     }
 
-    return `${usage.dailyLimit - usage.remainingToday}/${usage.dailyLimit} used today`;
+    return `${usage.dailyCount}/${usage.dailyLimit} used today`;
   }, [usage]);
 
   const usageProgress = useMemo(() => {
@@ -700,7 +786,7 @@ export default function ChatScreen() {
             <Pressable
               onPress={sendMessage}
               style={[styles.sendButton, loading && styles.sendButtonDisabled]}
-              disabled={loading}
+              disabled={loading || (usage?.remainingToStart ?? 1) <= 0}
             >
               {loading ? (
                 <ActivityIndicator size="small" color="#000000" />

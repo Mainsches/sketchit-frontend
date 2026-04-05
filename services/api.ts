@@ -1,4 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as Application from 'expo-application';
+import { Platform } from 'react-native';
 
 export type GenerationMode = 'fast' | 'balanced' | 'premium';
 
@@ -7,12 +9,15 @@ export type StartGenerationPayload = {
   imageBase64?: string | null;
   mimeType?: string | null;
   sessionId?: string;
+  deviceId?: string | null;
   generationMode?: GenerationMode;
 };
 
 export type GenerationRecord = {
   id: string;
   sessionId: string;
+  userKey?: string;
+  deviceId?: string | null;
   sourceGenerationId?: string | null;
   type: 'base' | 'variation' | string;
   status: 'queued' | 'pending' | 'processing' | 'done' | 'error' | string;
@@ -39,12 +44,17 @@ export type GenerationRecord = {
 
 export type UsageInfo = {
   sessionId: string;
+  userKey: string;
+  deviceId?: string | null;
   isPremium: boolean;
   dailyCount: number;
+  pendingCount: number;
   dailyLimit: number;
   remainingToday: number;
+  remainingToStart: number;
   totalCount: number;
   resetDayKey: string;
+  canStartGeneration: boolean;
   canUsePremiumMode: boolean;
   canUseVariations: boolean;
 };
@@ -81,6 +91,7 @@ export class ApiError extends Error {
 
 const API_BASE_URL = 'https://sketchit-backend-plov.onrender.com';
 const SESSION_STORAGE_KEY = 'sketchit_active_session_id';
+const DEVICE_ID_STORAGE_KEY = 'sketchit_device_id_fallback';
 
 function createLocalId(prefix = 'session') {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
@@ -123,9 +134,46 @@ export async function getOrCreateSessionId(): Promise<string> {
   return newSessionId;
 }
 
+async function getFallbackDeviceId(): Promise<string> {
+  const existing = await AsyncStorage.getItem(DEVICE_ID_STORAGE_KEY);
+
+  if (existing) {
+    return existing;
+  }
+
+  const newId = createLocalId('device');
+  await AsyncStorage.setItem(DEVICE_ID_STORAGE_KEY, newId);
+  return newId;
+}
+
+export async function getOrCreateDeviceId(): Promise<string> {
+  try {
+    if (Platform.OS === 'android') {
+      const androidId = Application.getAndroidId();
+
+      if (androidId && typeof androidId === 'string' && androidId.trim()) {
+        return androidId;
+      }
+    }
+
+    const installationId = Application.getInstallationTimeAsync
+      ? null
+      : null;
+
+    void installationId;
+    return await getFallbackDeviceId();
+  } catch (error) {
+    console.log('getOrCreateDeviceId error:', error);
+    return await getFallbackDeviceId();
+  }
+}
+
 export async function fetchUsage(sessionId?: string): Promise<UsageInfo> {
   const safeSessionId = sessionId || (await getOrCreateSessionId());
-  const response = await fetch(`${API_BASE_URL}/usage/${safeSessionId}`);
+  const deviceId = await getOrCreateDeviceId();
+
+  const url = `${API_BASE_URL}/usage/${safeSessionId}?deviceId=${encodeURIComponent(deviceId)}`;
+  const response = await fetch(url);
   const data = await parseJsonSafe<UsageResponse & { error?: string; code?: string }>(response);
 
   if (!response.ok || !data?.usage) {
@@ -139,6 +187,7 @@ export async function startGeneration(
   payload: StartGenerationPayload
 ): Promise<StartGenerationResponse> {
   const sessionId = payload.sessionId || (await getOrCreateSessionId());
+  const deviceId = payload.deviceId || (await getOrCreateDeviceId());
 
   const response = await fetch(`${API_BASE_URL}/generation/start`, {
     method: 'POST',
@@ -150,11 +199,14 @@ export async function startGeneration(
       imageBase64: payload.imageBase64 || null,
       mimeType: payload.mimeType || 'image/jpeg',
       sessionId,
+      deviceId,
       generationMode: payload.generationMode || 'balanced',
     }),
   });
 
-  const data = await parseJsonSafe<StartGenerationResponse & { error?: string; code?: string; usage?: UsageInfo }>(response);
+  const data = await parseJsonSafe<
+    StartGenerationResponse & { error?: string; code?: string; usage?: UsageInfo }
+  >(response);
 
   if (!response.ok || !data?.generation) {
     throw toApiError(response.status, data);
