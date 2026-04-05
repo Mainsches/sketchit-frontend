@@ -65,6 +65,7 @@ const KEYBOARD_GAP = 48;
 const POLL_INTERVAL_MS = 1800;
 const AUTO_SAVE_SETTING_KEY = 'sketchit_auto_save_generated_images';
 const USAGE_CACHE_KEY = 'sketchit_cached_usage_v1';
+const LOCK_CACHE_KEY = 'sketchit_server_confirmed_lock_v1';
 
 const PROMPT_SUGGESTIONS = [
   'Minimal white chair with metal legs',
@@ -158,9 +159,10 @@ export default function ChatScreen() {
     InteractionManager.runAfterInteractions(() => {
       performScrollToBottom(animated);
       setTimeout(() => performScrollToBottom(animated), 60);
-      setTimeout(() => performScrollToBottom(animated), 180);
-      setTimeout(() => performScrollToBottom(animated), 320);
+      setTimeout(() => performScrollToBottom(animated), 160);
+      setTimeout(() => performScrollToBottom(animated), 300);
       setTimeout(() => performScrollToBottom(animated), 520);
+      setTimeout(() => performScrollToBottom(animated), 800);
     });
   }, [performScrollToBottom]);
 
@@ -190,6 +192,24 @@ export default function ChatScreen() {
     } catch (error) {
       console.log('loadCachedUsage error:', error);
       return null;
+    }
+  }, []);
+
+  const saveConfirmedLock = useCallback(async (locked: boolean) => {
+    try {
+      await AsyncStorage.setItem(LOCK_CACHE_KEY, locked ? 'true' : 'false');
+    } catch (error) {
+      console.log('saveConfirmedLock error:', error);
+    }
+  }, []);
+
+  const loadConfirmedLock = useCallback(async (): Promise<boolean> => {
+    try {
+      const raw = await AsyncStorage.getItem(LOCK_CACHE_KEY);
+      return raw === 'true';
+    } catch (error) {
+      console.log('loadConfirmedLock error:', error);
+      return false;
     }
   }, []);
 
@@ -239,13 +259,32 @@ export default function ChatScreen() {
 
         await loadAutoSaveSetting();
 
-        const shouldLock =
-          result.source === 'network' &&
-          !!result.usage &&
-          result.usage.remainingToday <= 0 &&
-          result.usage.pendingCount <= 0;
+        if (loading) {
+          setUsageLoaded(true);
+          return;
+        }
 
-        setChatLocked(shouldLock);
+        if (result.source === 'network') {
+          const shouldLock =
+            !!result.usage &&
+            result.usage.remainingToday <= 0 &&
+            result.usage.pendingCount <= 0;
+
+          setChatLocked(shouldLock);
+          await saveConfirmedLock(shouldLock);
+        } else if (result.source === 'cache') {
+          const confirmedLock = await loadConfirmedLock();
+          setChatLocked(
+            confirmedLock &&
+              !!result.usage &&
+              result.usage.remainingToday <= 0 &&
+              result.usage.pendingCount <= 0
+          );
+        } else {
+          const confirmedLock = await loadConfirmedLock();
+          setChatLocked(confirmedLock);
+        }
+
         setUsageLoaded(true);
 
         setTimeout(() => {
@@ -260,7 +299,14 @@ export default function ChatScreen() {
       return () => {
         isActive = false;
       };
-    }, [loadUsageOnly, loadAutoSaveSetting, scheduleScrollToBottom])
+    }, [
+      loadUsageOnly,
+      loadAutoSaveSetting,
+      loadConfirmedLock,
+      saveConfirmedLock,
+      scheduleScrollToBottom,
+      loading,
+    ])
   );
 
   useEffect(() => {
@@ -467,6 +513,10 @@ export default function ChatScreen() {
         refreshed.usage.pendingCount <= 0
       ) {
         setChatLocked(true);
+        await saveConfirmedLock(true);
+      } else if (refreshed.source === 'network') {
+        setChatLocked(false);
+        await saveConfirmedLock(false);
       }
     } catch (error: any) {
       console.log('Generate error:', error);
@@ -476,14 +526,17 @@ export default function ChatScreen() {
         if (error.usage) {
           setUsage(error.usage);
           await saveUsageCache(error.usage);
+
           if (
             (error.code === 'DAILY_LIMIT_REACHED' || error.usage.remainingToday <= 0) &&
             error.usage.pendingCount <= 0
           ) {
             setChatLocked(true);
+            await saveConfirmedLock(true);
           }
         } else if (error.code === 'DAILY_LIMIT_REACHED') {
           setChatLocked(true);
+          await saveConfirmedLock(true);
         }
       }
 

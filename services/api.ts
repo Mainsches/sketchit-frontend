@@ -156,11 +156,6 @@ export async function getOrCreateDeviceId(): Promise<string> {
       }
     }
 
-    const installationId = Application.getInstallationTimeAsync
-      ? null
-      : null;
-
-    void installationId;
     return await getFallbackDeviceId();
   } catch (error) {
     console.log('getOrCreateDeviceId error:', error);
