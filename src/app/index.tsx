@@ -7,12 +7,12 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ActivityIndicator,
   Alert,
-  FlatList,
   Image,
   InteractionManager,
   Keyboard,
   Modal,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -140,31 +140,31 @@ export default function ChatScreen() {
   const [chatLocked, setChatLocked] = useState(false);
   const [usageLoaded, setUsageLoaded] = useState(false);
 
-  const flatListRef = useRef<FlatList<Message>>(null);
+  const scrollViewRef = useRef<ScrollView>(null);
   const insets = useSafeAreaInsets();
 
   const performScrollToBottom = useCallback((animated = true) => {
     try {
-      flatListRef.current?.scrollToEnd({ animated });
-    } catch {
-      try {
-        flatListRef.current?.scrollToOffset({ offset: 999999, animated });
-      } catch {}
-    }
+      scrollViewRef.current?.scrollToEnd({ animated });
+    } catch {}
   }, []);
 
-  const scheduleScrollToBottom = useCallback((animated = true) => {
-    requestAnimationFrame(() => performScrollToBottom(animated));
+  const scheduleScrollToBottom = useCallback(
+    (animated = true) => {
+      requestAnimationFrame(() => performScrollToBottom(animated));
 
-    InteractionManager.runAfterInteractions(() => {
-      performScrollToBottom(animated);
-      setTimeout(() => performScrollToBottom(animated), 60);
-      setTimeout(() => performScrollToBottom(animated), 160);
-      setTimeout(() => performScrollToBottom(animated), 300);
-      setTimeout(() => performScrollToBottom(animated), 520);
-      setTimeout(() => performScrollToBottom(animated), 800);
-    });
-  }, [performScrollToBottom]);
+      InteractionManager.runAfterInteractions(() => {
+        performScrollToBottom(animated);
+        setTimeout(() => performScrollToBottom(animated), 60);
+        setTimeout(() => performScrollToBottom(animated), 160);
+        setTimeout(() => performScrollToBottom(animated), 300);
+        setTimeout(() => performScrollToBottom(animated), 520);
+        setTimeout(() => performScrollToBottom(animated), 800);
+        setTimeout(() => performScrollToBottom(animated), 1200);
+      });
+    },
+    [performScrollToBottom]
+  );
 
   const openInfoSheet = useCallback((reason: SheetReason) => {
     setSheetReason(reason);
@@ -339,9 +339,7 @@ export default function ChatScreen() {
   }, [messages.length, scheduleScrollToBottom]);
 
   const openImageOptions = () => {
-    if (chatLocked) {
-      return;
-    }
+    if (chatLocked) return;
 
     Alert.alert('Attach sketch', 'Choose how you want to attach your sketch.', [
       { text: 'Cancel', style: 'cancel' },
@@ -646,12 +644,12 @@ export default function ChatScreen() {
       ? 'Variations will be enabled later together with Google Play Billing.'
       : 'This build is focused on testing the core generation flow first.';
 
-  const renderMessage = ({ item }: { item: Message }) => {
+  const renderMessage = (item: Message) => {
     const isUser = item.role === 'user';
     const isLoadingBubble = !isUser && !item.image && item.text?.includes('Generating');
 
     return (
-      <View style={[styles.message, isUser ? styles.userMessage : styles.aiMessage]}>
+      <View key={item.id} style={[styles.message, isUser ? styles.userMessage : styles.aiMessage]}>
         {item.image ? (
           <Pressable onPress={() => setFullscreenImage(item.image!)}>
             <Image source={{ uri: item.image }} style={styles.messageImage} />
@@ -760,50 +758,43 @@ export default function ChatScreen() {
         renderLockedContent()
       ) : (
         <>
-          <FlatList
-            ref={flatListRef}
-            data={messages}
-            renderItem={renderMessage}
-            keyExtractor={(item) => item.id}
-            contentContainerStyle={{
-              paddingHorizontal: 16,
-              paddingTop: 12,
-              paddingBottom: 210,
-            }}
+          <ScrollView
+            ref={scrollViewRef}
+            style={styles.scrollView}
+            contentContainerStyle={styles.scrollContent}
             keyboardShouldPersistTaps="handled"
             showsVerticalScrollIndicator={false}
             onContentSizeChange={() => scheduleScrollToBottom(false)}
             onLayout={() => scheduleScrollToBottom(false)}
-            ListHeaderComponent={
+          >
+            {messages.length === 0 ? (
               <>
-                {messages.length === 0 ? (
-                  <>
-                    <View style={styles.heroMini}>
-                      <Text style={styles.heroMiniTitle}>Sketch to image</Text>
-                      <Text style={styles.heroMiniSubtitle}>
-                        Attach a sketch or write a short prompt to generate a realistic result.
-                      </Text>
-                    </View>
+                <View style={styles.heroMini}>
+                  <Text style={styles.heroMiniTitle}>Sketch to image</Text>
+                  <Text style={styles.heroMiniSubtitle}>
+                    Attach a sketch or write a short prompt to generate a realistic result.
+                  </Text>
+                </View>
 
-                    <View style={styles.tipsSection}>
-                      <Text style={styles.tipsLabel}>Quick ideas</Text>
-                      <View style={styles.tipList}>
-                        {PROMPT_SUGGESTIONS.map((item) => (
-                          <Pressable
-                            key={item}
-                            style={styles.tipChip}
-                            onPress={() => onPressSuggestion(item)}
-                          >
-                            <Text style={styles.tipChipText}>{item}</Text>
-                          </Pressable>
-                        ))}
-                      </View>
-                    </View>
-                  </>
-                ) : null}
+                <View style={styles.tipsSection}>
+                  <Text style={styles.tipsLabel}>Quick ideas</Text>
+                  <View style={styles.tipList}>
+                    {PROMPT_SUGGESTIONS.map((item) => (
+                      <Pressable
+                        key={item}
+                        style={styles.tipChip}
+                        onPress={() => onPressSuggestion(item)}
+                      >
+                        <Text style={styles.tipChipText}>{item}</Text>
+                      </Pressable>
+                    ))}
+                  </View>
+                </View>
               </>
-            }
-          />
+            ) : null}
+
+            {messages.map(renderMessage)}
+          </ScrollView>
 
           {selectedImage ? (
             <View style={[styles.previewRow, { bottom: bottomOffset + 88 }]}>
@@ -906,6 +897,15 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#000000',
+  },
+
+  scrollView: {
+    flex: 1,
+  },
+  scrollContent: {
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 210,
   },
 
   usageBarWrap: {
